@@ -1,0 +1,9 @@
+export const ROW_HEADER_WIDTH = 54
+export const COLUMN_HEADER_HEIGHT = 42
+export const HEADER_FONT_SIZE = 12
+export const DEFAULT_ROW_HEIGHT = 56
+export const DEFAULT_COLUMN_WIDTH = 150
+export const MIN_ROW_HEIGHT = 28
+export const MIN_COLUMN_WIDTH = 64
+export const MIN_ZOOM = 0.25
+export const MAX_ZOOM = 2

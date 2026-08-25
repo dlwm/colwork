@@ -1,0 +1,33 @@
+{
+  "name": "colwork",
+  "version": "0.1.8",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm run dev:test",
+    "dev:test": "node server/index.mjs --mode test",
+    "server": "node server/index.mjs",
+    "server:test": "node server/index.mjs --mode test",
+    "rebuild:yjs": "node script/rebuild-yjs.mjs",
+    "build": "npm run build:lib",
+    "build:lib": "tsc --noEmit && vite build --config vite.lib.config.ts"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.4.1",
+    "@vitejs/plugin-vue": "^5.2.3",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "vue": "^3.5.13",
+    "ws": "^8.21.3",
+    "y-protocols": "^1.0.7",
+    "y-webrtc": "^10.3.0",
+    "y-websocket": "^2.1.0",
+    "yjs": "^13.6.27"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  }
+}
