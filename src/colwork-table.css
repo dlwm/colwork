@@ -1,8 +1,17 @@
-.colwork-table { border: 1px solid #dde3ea; border-radius: 12px; background: #fff; box-shadow: 0 12px 36px #3440540d; }
+.colwork-table { --colwork-freeze-color: #7394bf; --colwork-freeze-shadow: #33415524; border: 1px solid #dde3ea; border-radius: 12px; background: #fff; box-shadow: 0 12px 36px #3440540d; }
 .colwork-table, .colwork-table * { box-sizing: border-box; }
-.colwork-table__toolbar { display: flex; align-items: center; gap: 4px; height: 42px; padding: 0 10px; border-bottom: 1px solid #edf0f3; background: #fff; }
+.colwork-table__toolbar { display: flex; flex-direction: column; gap: 0; padding: 4px 12px; border-bottom: 1px solid #dde3ea; border-radius: 12px 12px 0 0; background: #fff; }
+.colwork-table__toolbar[hidden] { display: none; }
+.colwork-table__toolbar-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 6px 0; }
+.colwork-table__toolbar-row + .colwork-table__toolbar-row { border-top: 1px solid #edf0f3; }
+.colwork-table__toolbar-group { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; max-width: 100%; }
+.colwork-table__group-label { margin-right: 4px; color: #94a3b8; font: 11px system-ui, sans-serif; white-space: nowrap; }
+.colwork-table__toolbar button { white-space: nowrap; }
+.colwork-table__toolbar button:focus-visible { outline: 2px solid #93c5fd; outline-offset: 1px; }
+.colwork-table__dropdown-trigger::after { content: '⌄'; margin-left: 5px; color: #94a3b8; }
+
 .colwork-table__toolbar, .colwork-table__toolbar button, .colwork-table__toolbar input { user-select: none; }
-.colwork-table__format { min-width: 28px; height: 26px; border: 0; border-radius: 5px; color: #64748b; background: transparent; cursor: pointer; font: 600 13px Georgia, serif; }
+.colwork-table__format { min-width: 28px; height: 30px; padding: 0 7px; border: 0; border-radius: 5px; color: #475569; background: transparent; cursor: pointer; font: 500 12px system-ui, sans-serif; }
 .colwork-table__format:hover { color: #2563eb; background: #eff6ff; }
 .colwork-table__history { min-width: 28px; height: 26px; border: 0; border-radius: 5px; color: #64748b; background: transparent; cursor: pointer; font: 600 17px Georgia, serif; }
 .colwork-table__history:hover:not(:disabled) { color: #2563eb; background: #eff6ff; }
@@ -18,15 +27,15 @@
 .colwork-table__border-control:hover .colwork-table__border-menu, .colwork-table__border-menu:hover { display: flex; flex-direction: column; gap: 2px; }
 .colwork-table__border-menu button { border: 0; border-radius: 4px; padding: 6px 8px; color: #475569; background: transparent; cursor: pointer; text-align: left; font: inherit; font-size: 11px; }
 .colwork-table__border-menu button:hover { color: #1d4ed8; background: #eff6ff; }
-.colwork-table__context-menu { position: fixed; z-index: 100; display: flex; min-width: 150px; flex-direction: column; gap: 2px; border: 1px solid #dbe3ed; border-radius: 8px; padding: 5px; background: #fff; box-shadow: 0 12px 30px rgba(15, 23, 42, .18); }
-.colwork-table__context-menu button { border: 0; border-radius: 5px; padding: 7px 10px; color: #334155; background: transparent; cursor: pointer; text-align: left; font: inherit; font-size: 11px; white-space: nowrap; }
-.colwork-table__context-menu button:hover { color: #1d4ed8; background: #eff6ff; }
+.colwork-table__context-menu { position: fixed; z-index: 100; display: flex; width: 220px; max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); overflow-y: auto; flex-direction: column; gap: 5px; border: 1px solid #dbe3ed; border-radius: 8px; padding: 6px; background: #fff; box-shadow: 0 12px 30px rgba(15, 23, 42, .18); }
+.colwork-table__context-menu button { display: block; width: 100%; border: 0; border-radius: 5px; padding: 7px 10px; color: #334155; background: transparent; cursor: pointer; text-align: left; font: inherit; font-size: 11px; white-space: nowrap; }
+.colwork-table__context-menu button:hover, .colwork-table__context-menu button:focus-visible { color: #1d4ed8; background: #eff6ff; }
 .colwork-table__format--italic { font-style: italic; }
 .colwork-table__format--underline { text-decoration: underline; }
 .colwork-table__color { width: 24px; height: 24px; margin-left: 4px; border: 1px solid #cbd5e1; border-radius: 4px; padding: 2px; background: transparent; cursor: pointer; }
 .colwork-table__viewport { position: relative; width: 100%; height: min(560px, 55vh); min-height: 240px; overflow-x: auto; overflow-y: auto; scrollbar-gutter: stable; }
 .colwork-table__viewport:focus { outline: 0; }
-.colwork-table table { width: max-content; min-width: 100%; min-width: calc(900px * var(--colwork-zoom, 1)); border-collapse: collapse; table-layout: fixed; }
+.colwork-table table { width: max-content; min-width: 100%; min-width: calc(900px * var(--colwork-zoom, 1)); border-collapse: separate; border-spacing: 0; table-layout: fixed; }
 .colwork-table th, .colwork-table td { height: calc(56px * var(--colwork-zoom, 1)); border-top: 1px solid #edf0f3; border-right: 1px solid #edf0f3; padding: 0; text-align: left; }
 .colwork-table table, .colwork-table th, .colwork-table td, .colwork-table__cell-value { user-select: none; }
 .colwork-table th:last-child, .colwork-table td:last-child { border-right: 0; }
@@ -43,10 +52,50 @@
 .colwork-table__cell-value { display: block; overflow: hidden; transform-origin: left center; }
 .colwork-table__resize-handle { position: absolute; z-index: 6; display: block; opacity: 0; background: #4777b8; transition: opacity .12s ease; }
 .colwork-table__resize-handle:hover, .colwork-table__resize-handle:active { opacity: 1; }
-.colwork-table__resize-handle--column { top: 0; right: -3px; width: 6px; height: 100%; cursor: col-resize; }
-.colwork-table__resize-handle--row { right: 0; bottom: -3px; width: 100%; height: 6px; cursor: row-resize; }
+.colwork-table__resize-handle--column { top: 0; right: 0; width: 8px; height: 100%; cursor: col-resize; }
+.colwork-table__resize-handle--row { right: 0; bottom: 0; width: 100%; height: 8px; cursor: row-resize; }
 .colwork-table__viewport.is-resizing, .colwork-table__viewport.is-resizing * { user-select: none; }
 .colwork-table__selection, .colwork-table__remote-selection { position: absolute; z-index: 3; border: 2px solid; background: transparent; pointer-events: none; }
 .colwork-table__remote-selection { border-style: dashed; opacity: .75; }
 .colwork-table__remote-cursor { position: absolute; top: -1px; left: -1px; z-index: 2; max-width: 90px; overflow: hidden; padding: 2px 4px; border-radius: 3px; color: #fff; font-size: 9px; line-height: 12px; pointer-events: none; text-overflow: ellipsis; white-space: nowrap; }
 .colwork-table__editor { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; overflow: hidden; resize: none; border: 2px solid #4777b8; padding: 8px 12px; color: #334155; background: #f7fbff; font: inherit; line-height: 1.35; outline: 0; cursor: text; user-select: text; }
+.colwork-table__view-menu button { border: 0; border-radius: 4px; padding: 6px 8px; color: #475569; background: transparent; cursor: pointer; text-align: left; white-space: nowrap; font: inherit; font-size: 11px; }
+.colwork-table__view-menu button:hover, .colwork-table__view-menu button:focus-visible { background: #eff6ff; color: #1d4ed8; }
+.colwork-table__view-control:focus-within .colwork-table__view-menu { display: flex; flex-direction: column; gap: 5px; }
+.colwork-table td.is-frozen { background-color: #fff; }
+/* Separate cell borders move with sticky cells instead of staying in table coordinates. */
+.colwork-table thead th { z-index: 9; }
+.colwork-table thead th:first-child { z-index: 12; }
+.colwork-table tbody th { z-index: 7; }
+.colwork-table__password-dialog { width: min(360px, 90vw); border: 1px solid #dbe3ed; border-radius: 12px; padding: 22px; color: #334155; background: #fff; box-shadow: 0 12px 36px #34405433; }
+.colwork-table__password-dialog::backdrop { background: #0f172a66; }
+.colwork-table__password-dialog h3 { margin: 0 0 16px; }
+.colwork-table__password-dialog input { box-sizing: border-box; display: block; width: 100%; margin: 10px 0; padding: 8px; border: 1px solid #94a3b8; border-radius: 5px; }
+.colwork-table__password-dialog button { margin-right: 8px; padding: 6px 12px; cursor: pointer; }
+.colwork-table__password-dialog [role=alert], .colwork-table__lock-status { color: #b91c1c; font-size: 13px; }
+
+.colwork-table td.is-locked::after { content: ''; position: absolute; inset: 0; z-index: 1; background: repeating-linear-gradient(135deg, transparent 0 3.5px, rgba(100, 116, 139, .2) 3.5px 4.5px); pointer-events: none; }
+
+.colwork-table__message-dialog { box-sizing: border-box; width: min(420px, 90vw); border: 1px solid #dbe3ed; border-radius: 12px; padding: 24px; color: #334155; background: #fff; box-shadow: 0 16px 48px #0f172a33; }
+.colwork-table__message-dialog::backdrop { background: #0f172a66; }
+.colwork-table__message-dialog h3 { margin: 0 0 12px; font-size: 18px; }
+.colwork-table__message-dialog .colwork-table__lock-status { margin: 0 0 20px; color: #475569; font-size: 14px; line-height: 1.6; }
+.colwork-table__message-dialog button { display: block; margin-left: auto; border: 0; border-radius: 6px; padding: 8px 24px; color: #fff; background: #2563eb; font: inherit; cursor: pointer; }
+.colwork-table__message-dialog button:focus-visible { outline: 2px solid #2563eb; outline-offset: 3px; }
+
+.colwork-table th.is-selected-header { background-color: #dbeafe; color: #1d4ed8; }
+.colwork-table th.is-selected-header .colwork-table__column-letter { color: inherit; }
+
+.colwork-table__context-menu, .colwork-table__context-menu * { box-sizing: border-box; }
+.colwork-table__context-group + .colwork-table__context-group { border-top: 1px solid #edf0f3; padding-top: 5px; }
+.colwork-table__context-label { padding: 3px 10px 5px; color: #94a3b8; font: 11px system-ui, sans-serif; }
+.colwork-table__context-menu button.is-destructive { color: #b45353; }
+.colwork-table__context-menu button.is-destructive:hover { background: #fef2f2; }
+.colwork-table__border-control:focus-within .colwork-table__border-menu { display: flex; flex-direction: column; gap: 2px; }
+.colwork-table__frozen-boundary { position: absolute; z-index: 13; pointer-events: none; background: var(--colwork-freeze-color); }
+.colwork-table__frozen-boundary--row { height: 2px; box-shadow: 0 3px 5px var(--colwork-freeze-shadow); }
+.colwork-table__frozen-boundary--column { width: 2px; box-shadow: 3px 0 5px var(--colwork-freeze-shadow); }
+@media (max-width: 600px) {
+  .colwork-table__toolbar { padding: 4px 8px; }
+  .colwork-table__toolbar-row { gap: 6px 12px; }
+}

@@ -1,3 +1,4 @@
+import { createPasswordLock, verifyPasswordLock } from './passwordLock'
 import * as Y from 'yjs'
 import { Awareness } from 'y-protocols/awareness'
 import { WebrtcProvider } from 'y-webrtc'
@@ -71,6 +72,12 @@ export class ColworkTable {
   private readonly styles: Y.Map<string>
   private readonly rowHeights: Y.Map<number>
   private readonly columnWidths: Y.Map<number>
+  private readonly locks: Y.Map<string>
+  private messageDialog?: HTMLDialogElement
+  private passwordDialog?: HTMLDialogElement
+  private destroyed = false
+  private frozenRows = 0
+  private frozenColumns = 0
   private readonly merges: Y.Map<string>
   private readonly undoManager: Y.UndoManager
   private readonly provider?: WebrtcProvider | WebsocketProvider
@@ -78,7 +85,9 @@ export class ColworkTable {
   private readonly root: HTMLElement
   private readonly options: ColworkTableOptions
   private readonly table: HTMLTableElement
+  private readonly viewportResizeObserver: ResizeObserver
   private readonly viewport: HTMLDivElement
+  private protectionMenuButton?: HTMLButtonElement
   private contextMenu?: HTMLDivElement
   private pendingCellContext?: { x: number; y: number }
   private rightButtonReleased = false
@@ -92,6 +101,7 @@ export class ColworkTable {
   private showGridLines = true
   private bandedRows = false
   private readonly readOnly: boolean
+  private documentRevision = 0
   private updateSequence = 0
   private readonly updateLog: YjsUpdateRecord[] = []
   private resizing?: { axis: 'row' | 'column'; index: number; start: number; size: number; currentSize: number }
@@ -99,6 +109,16 @@ export class ColworkTable {
   private readonly onStylesChange = () => this.refreshStyles()
   private readonly onSizesChange = () => this.render()
   private readonly onMergesChange = () => this.render()
+  private readonly onLocksChange = () => {
+    // Old history must not restore content underneath a newly received lock.
+    this.undoManager.clear()
+    if (this.editingKey && this.isCellLocked(this.editingKey)) this.finishEdit(false)
+    if (this.resizing && this.isAxisLocked(this.resizing.axis, this.resizing.index)) {
+      this.resizing = undefined
+      this.viewport.classList.remove('is-resizing')
+    }
+    this.render()
+  }
   private readonly onAwarenessChange = () => {
     if (!this.table) return
     if (this.expandForRemoteSelections()) this.render()
@@ -146,7 +166,7 @@ export class ColworkTable {
     if ((event.target as HTMLElement).closest('th')) event.preventDefault()
   }
   private readonly onDocumentMouseDown = (event: MouseEvent) => {
-    if (this.contextMenu && !this.contextMenu.contains(event.target as Node)) this.hideContextMenu()
+    if (this.contextMenu && !this.contextMenu.contains(event.target as Node) && !this.protectionMenuButton?.contains(event.target as Node)) this.hideContextMenu()
   }
   private readonly onWindowMouseUp = (event: MouseEvent) => {
     if (this.resizing) {
@@ -170,7 +190,14 @@ export class ColworkTable {
     if (!this.pendingAwarenessCursor) return
     this.sendAwareness(this.pendingAwarenessCursor)
   }
+  private readonly onWindowBlur = () => {
+    if (!this.headerSelecting) return
+    this.selecting = false
+    this.headerSelecting = undefined
+    if (this.pendingAwarenessCursor) this.sendAwareness(this.pendingAwarenessCursor)
+  }
   private readonly onWindowMouseMove = (event: MouseEvent) => {
+    if (this.headerSelecting && !(event.buttons & 1)) this.onWindowBlur()
     if (!this.resizing) return
     const delta = this.resizing.axis === 'row' ? event.clientY - this.resizing.start : event.clientX - this.resizing.start
     const minimum = (this.resizing.axis === 'row' ? MIN_ROW_HEIGHT : MIN_COLUMN_WIDTH) * this.zoomRatio
@@ -192,6 +219,7 @@ export class ColworkTable {
   private readonly loggedPeers = new Set<object>()
   private readonly loggedSignals = new Set<object>()
   private readonly onDocUpdate = (update: Uint8Array, origin: unknown) => {
+    this.documentRevision += 1
     const internal = this.provider as unknown as { room?: unknown } | undefined
     const record: YjsUpdateRecord = { seq: ++this.updateSequence, update: bytesToBase64(update), timestamp: Date.now() }
     this.updateLog.push(record)
@@ -214,6 +242,7 @@ export class ColworkTable {
     this.rowHeights = this.doc.getMap<number>('rowHeights')
     this.columnWidths = this.doc.getMap<number>('columnWidths')
     this.merges = this.doc.getMap<string>('merges')
+    this.locks = this.doc.getMap<string>('locks')
     this.rowCountValue = Math.max(options.rowCount ?? 100, options.rows?.length ?? defaultRows.length)
     this.columnCountValue = Math.max(options.columnCount ?? 10, headers.length)
     const useWebrtc = options.transport === 'webrtc'
@@ -247,6 +276,31 @@ export class ColworkTable {
     const toolbar = document.createElement('div')
     toolbar.className = 'colwork-table__toolbar'
     if (this.readOnly) toolbar.hidden = true
+    toolbar.setAttribute('aria-label', '表格工具栏')
+    const commandRow = document.createElement('div')
+    commandRow.className = 'colwork-table__toolbar-row'
+    const formatRow = document.createElement('div')
+    formatRow.className = 'colwork-table__toolbar-row'
+    toolbar.append(commandRow, formatRow)
+    const group = (row: HTMLElement, label: string) => {
+      const section = document.createElement('div')
+      section.className = 'colwork-table__toolbar-group'
+      section.setAttribute('role', 'group')
+      section.setAttribute('aria-label', label)
+      const caption = document.createElement('span')
+      caption.className = 'colwork-table__group-label'
+      caption.textContent = label
+      section.append(caption)
+      row.append(section)
+      return section
+    }
+    const historyGroup = group(commandRow, '历史')
+    const cellGroup = group(commandRow, '单元格')
+    const protectionGroup = group(commandRow, '保护')
+    const viewGroup = group(commandRow, '显示')
+    const textGroup = group(formatRow, '文字')
+    const alignmentGroup = group(formatRow, '对齐')
+    const formatGroup = group(formatRow, '格式')
     const historyButtons: Array<[string, string, () => void]> = [
       ['撤销', '↶', () => this.undo()],
       ['重做', '↷', () => this.redo()],
@@ -261,7 +315,7 @@ export class ColworkTable {
       button.addEventListener('click', action)
       if (index === 0) this.undoButton = button
       else this.redoButton = button
-      toolbar.append(button)
+      historyGroup.append(button)
     })
     const gridActions: Array<[string, string, () => void]> = [
       ['合并单元格', '合并', () => this.mergeSelection()],
@@ -275,14 +329,36 @@ export class ColworkTable {
       button.textContent = label
       button.addEventListener('mousedown', (event) => event.preventDefault())
       button.addEventListener('click', action)
-      toolbar.append(button)
+      cellGroup.append(button)
     })
+    protectionGroup.querySelector('.colwork-table__group-label')?.remove()
+    const protectionButton = document.createElement('button')
+    this.protectionMenuButton = protectionButton
+    protectionButton.type = 'button'
+    protectionButton.className = 'colwork-table__format colwork-table__dropdown-trigger'
+    protectionButton.textContent = '保护'
+    protectionButton.title = '锁定、密码锁定与解锁'
+    protectionButton.setAttribute('aria-label', '保护')
+    protectionButton.setAttribute('aria-expanded', 'false')
+    protectionButton.addEventListener('mousedown', event => event.preventDefault())
+    protectionButton.addEventListener('click', () => {
+      if (protectionButton.getAttribute('aria-expanded') === 'true') { this.hideContextMenu(); return }
+      const rect = protectionButton.getBoundingClientRect()
+      this.showContextMenu(rect.left, rect.bottom + 4, [{ label: '锁定与解锁', actions: this.protectionActions() }])
+      protectionButton.setAttribute('aria-expanded', 'true')
+    })
+    protectionButton.addEventListener('keydown', event => {
+      if (event.key === 'ArrowDown') { event.preventDefault(); protectionButton.click() }
+    })
+    protectionGroup.append(protectionButton)
     const viewControl = document.createElement('div')
     viewControl.className = 'colwork-table__view-control'
     const viewButton = document.createElement('button')
     viewButton.type = 'button'
     viewButton.className = 'colwork-table__format'
     viewButton.textContent = '视图'
+    viewButton.setAttribute('aria-label', '视图')
+    viewButton.classList.add('colwork-table__dropdown-trigger')
     viewButton.title = '本地视图选项'
     const viewMenu = document.createElement('div')
     viewMenu.className = 'colwork-table__view-menu'
@@ -299,17 +375,30 @@ export class ColworkTable {
       option.append(checkbox, document.createTextNode(label))
       viewMenu.append(option)
     })
+    const freezeActions: Array<[string, () => void]> = [
+      ['固定至选中行', () => this.freezeSelection('row')],
+      ['固定至选中列', () => this.freezeSelection('column')],
+      ['取消固定', () => this.setFrozenPanes(0, 0)],
+    ]
+    freezeActions.forEach(([label, action]) => {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.textContent = label
+      button.addEventListener('mousedown', (event) => event.preventDefault())
+      button.addEventListener('click', action)
+      viewMenu.append(button)
+    })
     viewControl.append(viewButton, viewMenu)
-    toolbar.append(viewControl)
+    viewGroup.append(viewControl)
     ;[
       ['bold', 'B', '加粗'],
       ['italic', 'I', '斜体'],
       ['underline', 'U', '下划线'],
       ['strike', 'S', '删除线'],
       ['wrap', '换行', '自动换行'],
-      ['align-left', 'L', '左对齐'],
-      ['align-center', 'C', '居中'],
-      ['align-right', 'R', '右对齐'],
+      ['align-left', '左', '左对齐'],
+      ['align-center', '中', '居中'],
+      ['align-right', '右', '右对齐'],
     ].forEach(([format, label, title]) => {
       const button = document.createElement('button')
       button.type = 'button'
@@ -318,7 +407,7 @@ export class ColworkTable {
       button.title = title
       button.addEventListener('mousedown', (event) => event.preventDefault())
       button.addEventListener('click', () => format.startsWith('align-') ? this.setStyle('align', format.slice(6) as CellStyle['align']) : this.toggleFormat(format as BooleanStyleKey))
-      toolbar.append(button)
+      ;(format.startsWith('align-') || format === 'wrap' ? alignmentGroup : textGroup).append(button)
     })
     const fontSize = document.createElement('select')
     fontSize.className = 'colwork-table__select'
@@ -330,7 +419,7 @@ export class ColworkTable {
       fontSize.append(option)
     })
     fontSize.addEventListener('change', () => this.setStyle('fontSize', Number(fontSize.value)))
-    toolbar.append(fontSize)
+    textGroup.append(fontSize)
     const numberFormat = document.createElement('select')
     numberFormat.className = 'colwork-table__select'
     numberFormat.title = '单元格格式'
@@ -346,7 +435,7 @@ export class ColworkTable {
       numberFormat.append(option)
     })
     numberFormat.addEventListener('change', () => this.setStyle('format', numberFormat.value as CellStyle['format']))
-    toolbar.append(numberFormat)
+    formatGroup.append(numberFormat)
     const clearFormat = document.createElement('button')
     clearFormat.type = 'button'
     clearFormat.className = 'colwork-table__format'
@@ -354,7 +443,7 @@ export class ColworkTable {
     clearFormat.textContent = '清除'
     clearFormat.addEventListener('mousedown', (event) => event.preventDefault())
     clearFormat.addEventListener('click', () => this.clearFormatting())
-    toolbar.append(clearFormat)
+    formatGroup.append(clearFormat)
     const borderControl = document.createElement('div')
     borderControl.className = 'colwork-table__border-control'
     const borderButton = document.createElement('button')
@@ -362,6 +451,8 @@ export class ColworkTable {
     borderButton.className = 'colwork-table__format'
     borderButton.title = '边框选项'
     borderButton.textContent = '边框'
+    borderButton.setAttribute('aria-label', '边框')
+    borderButton.classList.add('colwork-table__dropdown-trigger')
     const borderMenu = document.createElement('div')
     borderMenu.className = 'colwork-table__border-menu'
     ;[
@@ -377,7 +468,7 @@ export class ColworkTable {
       borderMenu.append(option)
     })
     borderControl.append(borderButton, borderMenu)
-    toolbar.append(borderControl)
+    formatGroup.insertBefore(borderControl, clearFormat)
     ;[
       ['color', '文字颜色'],
       ['background', '背景颜色'],
@@ -387,7 +478,7 @@ export class ColworkTable {
       input.className = `colwork-table__color colwork-table__color--${format}`
       input.title = title
       input.addEventListener('input', () => this.setStyle(format as 'color' | 'background', input.value))
-      toolbar.append(input)
+      ;(format === 'color' ? textGroup : formatGroup).append(input)
     })
     this.viewport = document.createElement('div')
     this.viewport.className = 'colwork-table__viewport'
@@ -399,6 +490,7 @@ export class ColworkTable {
     this.viewport.addEventListener('paste', this.onPaste, true)
     window.addEventListener('mouseup', this.onWindowMouseUp)
     window.addEventListener('mousemove', this.onWindowMouseMove)
+    window.addEventListener('blur', this.onWindowBlur)
     document.addEventListener('mousedown', this.onDocumentMouseDown)
     this.table = document.createElement('table')
     this.table.addEventListener('mousedown', this.onTableMouseDown)
@@ -406,8 +498,9 @@ export class ColworkTable {
     shell.append(toolbar, this.viewport)
     root.replaceChildren(shell)
 
-    const shouldSeedDemo = !this.readOnly && this.cells.size === 0
-    if (!this.readOnly) this.seed(options.rows ?? defaultRows)
+    const shouldSeed = !this.readOnly && !options.snapshot && !options.updates?.length
+    const shouldSeedDemo = shouldSeed && this.cells.size === 0 && this.locks.size === 0
+    if (shouldSeed) this.seed(options.rows ?? defaultRows)
     if (shouldSeedDemo) this.seedDemoFormatting()
     this.expandLogicalSizeFromDocument()
     this.undoManager = new Y.UndoManager([this.cells, this.styles, this.rowHeights, this.columnWidths, this.merges], { captureTimeout: 500 })
@@ -421,6 +514,9 @@ export class ColworkTable {
     this.rowHeights.observe(this.onSizesChange)
     this.columnWidths.observe(this.onSizesChange)
     this.merges.observe(this.onMergesChange)
+    this.locks.observe(this.onLocksChange)
+    this.viewportResizeObserver = new ResizeObserver(() => this.refreshFrozenBoundaries())
+    this.viewportResizeObserver.observe(this.viewport)
     if (this.provider) {
       const providerEvents = this.provider as unknown as { on: (event: string, callback: (payload: any) => void) => void }
       providerEvents.on('status', ({ connected, status }) => {
@@ -480,6 +576,240 @@ export class ColworkTable {
     }
   }
 
+  /** Freeze a leading prefix of rows/columns in this client only. */
+  setFrozenPanes(rows: number, columns: number) {
+    if (![rows, columns].every((value) => Number.isInteger(value) && value >= 0)) {
+      throw new RangeError('Frozen row and column counts must be non-negative integers')
+    }
+    const nextRows = Math.min(rows, this.rowCount - 1)
+    const nextColumns = Math.min(columns, this.columnCount - 1)
+    if (this.hasPartialMerge('row', 0, nextRows - 1) || this.hasPartialMerge('column', 0, nextColumns - 1)) {
+      this.showLockMessage('当前选择包含不完整的合并块，无法固定，请选择完整的合并块')
+      return false
+    }
+    this.finishEdit(true)
+    this.frozenRows = nextRows
+    this.frozenColumns = nextColumns
+    this.closeLockMessage()
+    this.render()
+    return true
+  }
+
+  private hasPartialMerge(axis: 'row' | 'column', start: number, end: number) {
+    if (start > end) return false
+    return this.getMergeRanges().some(merge => {
+      const first = merge.start[axis]
+      const last = merge.end[axis]
+      return first <= end && last >= start && (first < start || last > end)
+    })
+  }
+
+  private crossesFrozenBoundary(range: CellRange) {
+    return (range.start.row < this.frozenRows && range.end.row >= this.frozenRows)
+      || (range.start.column < this.frozenColumns && range.end.column >= this.frozenColumns)
+  }
+
+  private freezeSelection(axis: 'row' | 'column') {
+    if (!this.selectionFocus) return
+    const range = selectionRange(this.selectionAnchor, this.selectionFocus)
+    // Validate the selected collection as well as the resulting leading prefix.
+    if (this.hasPartialMerge(axis, range.start[axis], range.end[axis])) {
+      this.showLockMessage('当前选择包含不完整的合并块，无法固定，请选择完整的合并块')
+      return
+    }
+    this.setFrozenPanes(axis === 'row' ? range.end.row + 1 : this.frozenRows,
+      axis === 'column' ? range.end.column + 1 : this.frozenColumns)
+  }
+
+  private rangeHasLocks(range: CellRange) {
+    return Array.from(this.locks.keys()).some((key) => {
+      const [row, column] = key.split(':').map(Number)
+      return containsPosition(range, { row, column })
+    })
+  }
+
+  private isCellLocked(key: string) {
+    if (this.locks.has(key)) return true
+    const [row, column] = key.split(':').map(Number)
+    const merge = this.getMergeRanges().find((range) => containsPosition(range, { row, column }))
+    return !!merge && this.rangeHasLocks(merge)
+  }
+
+  private isCellPasswordLocked(key: string) {
+    const protectedKey = (key: string) => this.locks.has(key) && this.locks.get(key) !== '1'
+    if (protectedKey(key)) return true
+    const [row, column] = key.split(':').map(Number)
+    const merge = this.getMergeRanges().find(range => containsPosition(range, { row, column }))
+    return !!merge && Array.from(this.locks.keys()).some(key => {
+      const [row, column] = key.split(':').map(Number)
+      return protectedKey(key) && containsPosition(merge, { row, column })
+    })
+  }
+
+  private selectionHasLocks() {
+    return this.rangeHasLocks(selectionRange(this.selectionAnchor, this.selectionFocus))
+  }
+
+  private isAxisLocked(axis: 'row' | 'column', index: number, following = false) {
+    return Array.from(this.locks.keys()).some((key) => {
+      const coordinate = Number(key.split(':')[axis === 'row' ? 0 : 1])
+      return following ? coordinate >= index : coordinate === index
+    })
+  }
+
+  /** Passwords are optional for legacy/plain locks; protected locks require verification. */
+  async setSelectionLocked(locked: boolean, password?: string): Promise<void> {
+    if (this.readOnly || this.destroyed || !this.selectionFocus) return
+    this.finishEdit(true)
+    const expanded = this.expandSelectionToMerges(
+      this.selectionAnchor ?? this.selectionFocus, this.selectionFocus)
+    const range = selectionRange(expanded.anchor, expanded.focus)
+    const keys: string[] = []
+    for (let row = range.start.row; row <= range.end.row; row += 1) {
+      for (let column = range.start.column; column <= range.end.column; column += 1) keys.push(cellKey({ row, column }))
+    }
+    const protectedRecords = [...new Set(keys.map(key => this.locks.get(key)).filter((value): value is string => value !== undefined && value !== '1'))]
+    // Re-locking must never replace a password verifier with an unprotected lock.
+    if (locked && protectedRecords.length) throw new Error('选区包含密码锁定单元格，请先用原密码解锁')
+    const revision = this.documentRevision
+    let record = '1'
+    if (locked && password !== undefined) record = await createPasswordLock(password)
+    if (!locked && protectedRecords.length) {
+      if (!password) throw new Error('请输入解锁密码')
+      for (const protectedRecord of protectedRecords) {
+        if (!await verifyPasswordLock(protectedRecord, password)) throw new Error('密码不正确，选区未解锁')
+      }
+    }
+    // Crypto is asynchronous: reject concurrent document edits rather than applying
+    // a verified result to changed locks or coordinates. Selection itself is captured.
+    if (this.destroyed) return
+    if (revision !== this.documentRevision) throw new Error('表格内容或锁定状态已变化，请重试')
+    this.doc.transact(() => {
+      keys.forEach(key => {
+        if (locked) this.locks.set(key, record)
+        else this.locks.delete(key)
+      })
+    })
+  }
+
+  private requestSelectionLock(locked: boolean, withPassword = false) {
+    if (this.readOnly || this.destroyed || !this.selectionFocus || this.passwordDialog) return
+    this.closeLockMessage()
+    const range = selectionRange(this.selectionAnchor, this.selectionFocus)
+    const needsPassword = withPassword || (!locked && Array.from(this.locks.entries()).some(([key, value]) => {
+      const [row, column] = key.split(':').map(Number)
+      return value !== '1' && containsPosition(range, { row, column })
+    }))
+    if (!needsPassword) {
+      void this.setSelectionLocked(locked).catch(error => this.showLockMessage(error instanceof Error ? error.message : '操作失败'))
+      return
+    }
+    const dialog = document.createElement('dialog')
+    this.passwordDialog = dialog
+    dialog.className = 'colwork-table__password-dialog'
+    dialog.setAttribute('aria-label', locked ? '密码锁定' : '密码解锁')
+    const form = document.createElement('form')
+    const title = document.createElement('h3')
+    title.textContent = locked ? '设置锁定密码' : '输入解锁密码'
+    const password = document.createElement('input')
+    password.type = 'password'
+    password.required = true
+    password.placeholder = locked ? '设置密码' : '输入密码'
+    password.autocomplete = locked ? 'new-password' : 'current-password'
+    password.setAttribute('aria-label', '密码')
+    const confirmation = document.createElement('input')
+    confirmation.type = 'password'
+    confirmation.required = locked
+    confirmation.placeholder = '再次输入密码'
+    confirmation.autocomplete = 'new-password'
+    confirmation.setAttribute('aria-label', '确认密码')
+    const error = document.createElement('p')
+    error.setAttribute('role', 'alert')
+    const submit = document.createElement('button')
+    submit.type = 'submit'
+    submit.textContent = locked ? '确认锁定' : '确认解锁'
+    const cancel = document.createElement('button')
+    cancel.type = 'button'
+    cancel.textContent = '取消'
+    cancel.addEventListener('click', () => dialog.close())
+    dialog.addEventListener('close', () => {
+      password.value = ''; confirmation.value = ''
+      dialog.remove()
+      if (this.passwordDialog === dialog) this.passwordDialog = undefined
+    })
+    // Capture selection when opening; the modal keeps ordinary pointer/keyboard
+    // actions out of the sheet. Cancellation is disabled while crypto is running.
+    const anchor = this.selectionAnchor && { ...this.selectionAnchor }
+    const focus = { ...this.selectionFocus }
+    form.addEventListener('submit', async event => {
+      event.preventDefault()
+      if (submit.disabled) return
+      if (locked && password.value !== confirmation.value) { error.textContent = '两次输入的密码不一致'; return }
+      submit.disabled = true
+      cancel.disabled = true
+      dialog.oncancel = event => event.preventDefault()
+      error.textContent = '正在处理…'
+      try {
+        this.selectionAnchor = anchor
+        this.selectionFocus = focus
+        await this.setSelectionLocked(locked, password.value)
+        dialog.close()
+      } catch (failure) {
+        error.textContent = failure instanceof Error ? failure.message : '操作失败，请重试'
+        password.value = ''; confirmation.value = ''
+        password.focus()
+      } finally {
+        submit.disabled = false
+        cancel.disabled = false
+        dialog.oncancel = null
+      }
+    })
+    form.append(title, password)
+    if (locked) form.append(confirmation)
+    form.append(error, submit, cancel)
+    dialog.append(form)
+    this.root.append(dialog)
+    dialog.showModal()
+    password.focus()
+  }
+
+  private closeLockMessage() {
+    const dialog = this.messageDialog
+    this.messageDialog = undefined
+    dialog?.close()
+    dialog?.remove()
+  }
+
+  private showLockMessage(message: string) {
+    if (this.destroyed) return
+    this.closeLockMessage()
+    this.hideContextMenu()
+    const dialog = document.createElement('dialog')
+    this.messageDialog = dialog
+    dialog.className = 'colwork-table__message-dialog'
+    dialog.setAttribute('role', 'alertdialog')
+    dialog.setAttribute('aria-label', '操作提示')
+    dialog.setAttribute('aria-description', message)
+    const title = document.createElement('h3')
+    title.textContent = '操作提示'
+    const status = document.createElement('p')
+    status.className = 'colwork-table__lock-status'
+    status.setAttribute('role', 'status')
+    status.textContent = message
+    const confirm = document.createElement('button')
+    confirm.type = 'button'
+    confirm.textContent = '确定'
+    confirm.addEventListener('click', () => dialog.close())
+    dialog.addEventListener('close', () => {
+      dialog.remove()
+      if (this.messageDialog === dialog) this.messageDialog = undefined
+    })
+    dialog.append(title, status, confirm)
+    this.root.append(dialog)
+    dialog.showModal()
+    confirm.focus()
+  }
+
   private get rowCount() { return this.rowCountValue }
   private get columnCount() { return this.columnCountValue }
   private get rowHeaderWidth() { return ROW_HEADER_WIDTH * this.zoomRatio }
@@ -498,6 +828,10 @@ export class ColworkTable {
   private beginResize(axis: 'row' | 'column', index: number, event: MouseEvent) {
     event.preventDefault()
     event.stopPropagation()
+    if (event.button !== 0 || this.readOnly || this.isAxisLocked(axis, index)) return
+    this.finishEdit(true)
+    this.selecting = false
+    this.headerSelecting = undefined
     this.resizing = {
       axis,
       index,
@@ -525,31 +859,72 @@ export class ColworkTable {
   }
 
   private hideContextMenu() {
+    this.protectionMenuButton?.setAttribute('aria-expanded', 'false')
     this.contextMenu?.remove()
     this.contextMenu = undefined
   }
 
-  private showContextMenu(x: number, y: number, actions: Array<[string, () => void]>) {
+  private showContextMenu(x: number, y: number, groups: Array<{ label: string; actions: Array<[string, () => void]> }>) {
     this.hideContextMenu()
     const menu = document.createElement('div')
     menu.className = 'colwork-table__context-menu'
-    actions.forEach(([label, action]) => {
-      const button = document.createElement('button')
-      button.type = 'button'
-      button.textContent = label
-      button.addEventListener('click', () => {
-        this.hideContextMenu()
-        action()
+    menu.setAttribute('aria-label', '表格操作')
+    groups.forEach(({ label, actions }) => {
+      const section = document.createElement('div')
+      section.className = 'colwork-table__context-group'
+      section.setAttribute('role', 'group')
+      section.setAttribute('aria-label', label)
+      const caption = document.createElement('div')
+      caption.className = 'colwork-table__context-label'
+      caption.textContent = label
+      section.append(caption)
+      actions.forEach(([label, action]) => {
+        const button = document.createElement('button')
+        button.type = 'button'
+        button.textContent = label
+        if (label.startsWith('删除') || label === '清空内容') button.className = 'is-destructive'
+        button.addEventListener('click', () => {
+          this.hideContextMenu()
+          action()
+        })
+        section.append(button)
       })
-      menu.append(button)
+      menu.append(section)
+    })
+    menu.addEventListener('keydown', event => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        this.hideContextMenu()
+        this.viewport.focus({ preventScroll: true })
+        return
+      }
+      const buttons = Array.from(menu.querySelectorAll('button'))
+      const index = buttons.indexOf(document.activeElement as HTMLButtonElement)
+      let next: number
+      if (event.key === 'ArrowDown') next = (index + 1) % buttons.length
+      else if (event.key === 'ArrowUp') next = (index - 1 + buttons.length) % buttons.length
+      else if (event.key === 'Home') next = 0
+      else if (event.key === 'End') next = buttons.length - 1
+      else return
+      event.preventDefault()
+      buttons[next]?.focus()
     })
     menu.style.left = `${x}px`
     menu.style.top = `${y}px`
     document.body.append(menu)
     const rect = menu.getBoundingClientRect()
-    menu.style.left = `${Math.min(x, window.innerWidth - rect.width - 8)}px`
-    menu.style.top = `${Math.min(y, window.innerHeight - rect.height - 8)}px`
+    menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`
+    menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`
     this.contextMenu = menu
+    menu.querySelector('button')?.focus({ preventScroll: true })
+  }
+
+  private protectionActions(): Array<[string, () => void]> {
+    return [
+      ['锁定选区', () => this.requestSelectionLock(true)],
+      ['密码锁定选区', () => this.requestSelectionLock(true, true)],
+      ['解锁选区', () => this.requestSelectionLock(false)],
+    ]
   }
 
   private hasHeaderSelection(axis: 'row' | 'column', index: number) {
@@ -567,9 +942,16 @@ export class ColworkTable {
     const range = selectionRange(this.selectionAnchor, this.selectionFocus)
     const count = range.end.row - range.start.row + 1
     this.showContextMenu(event.clientX, event.clientY, [
-      [`在上方插入 ${count} 行`, () => this.modifyAxis('row', range.start.row, count)],
-      [`在下方插入 ${count} 行`, () => this.modifyAxis('row', range.end.row + 1, count)],
-      [`删除 ${count} 行`, () => this.deleteRows()],
+      { label: '行操作', actions: [
+        [`在上方插入 ${count} 行`, () => this.modifyAxis('row', range.start.row, count)],
+        [`在下方插入 ${count} 行`, () => this.modifyAxis('row', range.end.row + 1, count)],
+        [`删除 ${count} 行`, () => this.deleteRows()],
+      ] },
+      { label: '固定', actions: [
+        ['固定至此行', () => this.freezeSelection('row')],
+        ['取消固定', () => this.setFrozenPanes(0, 0)],
+      ] },
+      { label: '保护', actions: this.protectionActions() },
     ])
   }
 
@@ -581,9 +963,16 @@ export class ColworkTable {
     const range = selectionRange(this.selectionAnchor, this.selectionFocus)
     const count = range.end.column - range.start.column + 1
     this.showContextMenu(event.clientX, event.clientY, [
-      [`在左侧插入 ${count} 列`, () => this.modifyAxis('column', range.start.column, count)],
-      [`在右侧插入 ${count} 列`, () => this.modifyAxis('column', range.end.column + 1, count)],
-      [`删除 ${count} 列`, () => this.deleteColumns()],
+      { label: '列操作', actions: [
+        [`在左侧插入 ${count} 列`, () => this.modifyAxis('column', range.start.column, count)],
+        [`在右侧插入 ${count} 列`, () => this.modifyAxis('column', range.end.column + 1, count)],
+        [`删除 ${count} 列`, () => this.deleteColumns()],
+      ] },
+      { label: '固定', actions: [
+        ['固定至此列', () => this.freezeSelection('column')],
+        ['取消固定', () => this.setFrozenPanes(0, 0)],
+      ] },
+      { label: '保护', actions: this.protectionActions() },
     ])
   }
 
@@ -641,9 +1030,14 @@ export class ColworkTable {
   }
 
   private mergeSelection() {
-    if (this.readOnly) return
+    if (this.readOnly || this.selectionHasLocks()) return
     const range = selectionRange(this.selectionAnchor, this.selectionFocus)
     if (range.start.row === range.end.row && range.start.column === range.end.column) return
+    if (this.crossesFrozenBoundary(range)) {
+      this.showLockMessage('合并范围同时包含固定和非固定区域，无法合并，请调整选区或取消固定')
+      return
+    }
+    this.closeLockMessage()
     this.doc.transact(() => {
       this.getMergeRanges().forEach((existing) => {
         if (containsPosition(range, existing.start) || containsPosition(existing, range.start)) this.merges.delete(this.mergeKey(existing))
@@ -653,7 +1047,7 @@ export class ColworkTable {
   }
 
   private unmergeSelection() {
-    if (this.readOnly) return
+    if (this.readOnly || this.selectionHasLocks()) return
     const range = selectionRange(this.selectionAnchor, this.selectionFocus)
     this.doc.transact(() => this.getMergeRanges().forEach((existing) => {
       if (containsPosition(range, existing.start) || containsPosition(existing, range.start)) this.merges.delete(this.mergeKey(existing))
@@ -661,7 +1055,7 @@ export class ColworkTable {
   }
 
   private modifyAxis(axis: 'row' | 'column', index: number, amount: number, removeCount = 0) {
-    if (this.readOnly || amount === 0) return
+    if (this.readOnly || amount === 0 || this.isAxisLocked(axis, index, true)) return
     const maps = [this.cells, this.styles]
     this.doc.transact(() => {
       maps.forEach((map) => {
@@ -711,6 +1105,10 @@ export class ColworkTable {
     if (extend && this.selectionMode === axis) {
       anchor = axis === 'row' ? this.selectionAnchor?.row ?? index : this.selectionAnchor?.column ?? index
     }
+    this.selectHeaderSpan(axis, anchor, index)
+  }
+
+  private selectHeaderSpan(axis: 'row' | 'column', anchor: number, index: number) {
     if (axis === 'row') {
       this.selectRange({ row: anchor, column: 0 }, { row: index, column: this.columnCount - 1 }, 'row')
     } else {
@@ -719,16 +1117,23 @@ export class ColworkTable {
   }
 
   private addHeaderSelection(element: HTMLElement, axis: 'row' | 'column', index: number) {
+    element.dataset.selectionAxis = axis
+    element.dataset.selectionIndex = String(index)
     element.addEventListener('mousedown', (event) => {
+      if (event.button !== 0) return
       event.preventDefault()
       event.stopPropagation()
-      this.headerSelecting = { axis, anchor: index }
-      this.selecting = true
+      this.finishEdit(true)
+      this.viewport.focus({ preventScroll: true })
+      this.hideContextMenu()
       this.selectHeaderRange(axis, index, event.shiftKey)
+      this.headerSelecting = { axis, anchor: this.selectionAnchor![axis] }
+      this.selecting = true
     })
-    element.addEventListener('mouseenter', () => {
+    element.addEventListener('mouseenter', (event) => {
       if (!this.selecting || !this.headerSelecting || this.headerSelecting.axis !== axis) return
-      this.selectHeaderRange(axis, index, false)
+      if (!(event.buttons & 1)) { this.onWindowBlur(); return }
+      this.selectHeaderSpan(axis, this.headerSelecting.anchor, index)
     })
     element.addEventListener('contextmenu', (event) => axis === 'row' ? this.openRowContextMenu(event, index) : this.openColumnContextMenu(event, index))
   }
@@ -828,7 +1233,7 @@ export class ColworkTable {
   }
 
   private clearSelectionContents() {
-    if (this.readOnly) return
+    if (this.readOnly || this.selectionHasLocks()) return
     const range = selectionRange(this.selectionAnchor, this.selectionFocus)
     this.doc.transact(() => {
       for (let row = range.start.row; row <= range.end.row; row += 1) {
@@ -840,10 +1245,20 @@ export class ColworkTable {
   private showCellContextMenu(x: number, y: number) {
     if (this.readOnly) return
     this.showContextMenu(x, y, [
-      ['复制', () => this.copySelection()],
-      ['清空内容', () => this.clearSelectionContents()],
-      ['合并单元格', () => this.mergeSelection()],
-      ['取消合并单元格', () => this.unmergeSelection()],
+      { label: '编辑', actions: [
+        ['复制', () => this.copySelection()],
+        ['清空内容', () => this.clearSelectionContents()],
+      ] },
+      { label: '单元格', actions: [
+        ['合并单元格', () => this.mergeSelection()],
+        ['取消合并单元格', () => this.unmergeSelection()],
+      ] },
+      { label: '固定', actions: [
+        ['固定至选中行', () => this.freezeSelection('row')],
+        ['固定至选中列', () => this.freezeSelection('column')],
+        ['取消固定', () => this.setFrozenPanes(0, 0)],
+      ] },
+      { label: '保护', actions: this.protectionActions() },
     ])
   }
 
@@ -896,6 +1311,7 @@ export class ColworkTable {
     }
     const start = this.selectionFocus
     const columnCount = Math.max(...rows.map((row) => row.length))
+    if (rows.some((row, r) => row.some((_, c) => this.isCellLocked(cellKey({ row: start.row + r, column: start.column + c }))))) return
     this.doc.transact(() => rows.forEach((row, rowIndex) => row.forEach((value, columnIndex) => {
       const targetRow = start.row + rowIndex
       const targetColumn = start.column + columnIndex
@@ -955,7 +1371,7 @@ export class ColworkTable {
   private seed(rows: string[][]) {
     rows.forEach((row, rowIndex) => row.forEach((value, columnIndex) => {
       const key = `${rowIndex}:${columnIndex}`
-      if (!this.cells.has(key)) this.cells.set(key, value)
+      if (!this.cells.has(key) && !this.isCellLocked(key)) this.cells.set(key, value)
     }))
   }
 
@@ -994,7 +1410,7 @@ export class ColworkTable {
   }
 
   private expandLogicalSizeFromDocument() {
-    const keys = [...this.cells.keys(), ...this.styles.keys(), ...this.rowHeights.keys(), ...this.columnWidths.keys()]
+    const keys = [...this.cells.keys(), ...this.styles.keys(), ...this.locks.keys(), ...this.rowHeights.keys(), ...this.columnWidths.keys()]
       .map((key) => key.split(':').map(Number))
       .filter(([row, column]) => Number.isInteger(row) && Number.isInteger(column))
     if (!keys.length) return
@@ -1003,8 +1419,19 @@ export class ColworkTable {
   }
 
   private render() {
+    if (this.editor) this.finishEdit(true)
     const columnCount = this.columnCount
     const rowCount = this.rowCount
+    this.frozenRows = Math.min(this.frozenRows, rowCount - 1)
+    this.frozenColumns = Math.min(this.frozenColumns, columnCount - 1)
+    // A remote merge cannot be rejected locally; release only affected local panes.
+    const invalidRows = this.hasPartialMerge('row', 0, this.frozenRows - 1)
+    const invalidColumns = this.hasPartialMerge('column', 0, this.frozenColumns - 1)
+    if (invalidRows || invalidColumns) {
+      if (invalidRows) this.frozenRows = 0
+      if (invalidColumns) this.frozenColumns = 0
+      this.showLockMessage('合并区域已变化，已取消与合并块冲突的固定行列')
+    }
     const rowSize = (row: number) => this.getRowHeight(row)
     const columnSize = (column: number) => this.getColumnWidth(column)
     const view = getViewportRange({
@@ -1018,6 +1445,44 @@ export class ColworkTable {
       columnSize,
       overscan: 4,
     })
+    // Keep complete visible merges mounted without changing the frozen boundary.
+    let changed = true
+    const merges = this.getMergeRanges()
+    while (changed) {
+      changed = false
+      for (const merge of merges) {
+        const visibleRow = merge.start.row <= view.bottom && (merge.end.row >= view.top || merge.start.row < this.frozenRows)
+        const visibleColumn = merge.start.column <= view.right && (merge.end.column >= view.left || merge.start.column < this.frozenColumns)
+        if (!visibleRow || !visibleColumn) continue
+        if (merge.start.row >= this.frozenRows && merge.start.row < view.top) { view.top = merge.start.row; changed = true }
+        if (merge.start.column >= this.frozenColumns && merge.start.column < view.left) { view.left = merge.start.column; changed = true }
+        if (merge.end.row > view.bottom) { view.bottom = merge.end.row; changed = true }
+        if (merge.end.column > view.right) { view.right = merge.end.column; changed = true }
+      }
+    }
+    view.bottom = Math.max(view.bottom, this.frozenRows - 1)
+    view.right = Math.max(view.right, this.frozenColumns - 1)
+    const rowStart = Math.max(this.frozenRows, view.top)
+    const columnStart = Math.max(this.frozenColumns, view.left)
+    const indices = (fixed: number, start: number, end: number) => [
+      ...Array.from({ length: fixed }, (_, index) => index),
+      -1, // spacer between the frozen prefix and the virtual window
+      ...Array.from({ length: Math.max(0, end - start + 1) }, (_, index) => start + index),
+    ]
+    const rows = indices(this.frozenRows, rowStart, view.bottom)
+    const columns = indices(this.frozenColumns, columnStart, view.right)
+    const gapWidth = getViewportOffset(columnStart, columnSize) - getViewportOffset(this.frozenColumns, columnSize)
+    const gapHeight = getViewportOffset(rowStart, rowSize) - getViewportOffset(this.frozenRows, rowSize)
+    const pin = (element: HTMLElement, row: number, column: number) => {
+      const top = row >= 0 && row < this.frozenRows
+      const left = column >= 0 && column < this.frozenColumns
+      if (!top && !left) return
+      element.classList.add('is-frozen')
+      element.style.position = 'sticky'
+      if (top) element.style.top = `${this.columnHeaderHeight + getViewportOffset(row, rowSize)}px`
+      if (left) element.style.left = `${this.rowHeaderWidth + getViewportOffset(column, columnSize)}px`
+      element.style.zIndex = String(row < 0 ? 10 : column < 0 ? 8 : top && left ? 5 : top ? 4 : 3)
+    }
     const thead = document.createElement('thead')
     const headerRow = document.createElement('tr')
     const corner = document.createElement('th')
@@ -1036,8 +1501,8 @@ export class ColworkTable {
       th.style.border = '0'
       return th
     }
-    headerRow.append(columnSpacer(getViewportOffset(view.left, columnSize)))
-    for (let index = view.left; index <= view.right; index += 1) {
+    for (const index of columns) {
+      if (index === -1) { headerRow.append(columnSpacer(gapWidth)); continue }
       const th = document.createElement('th')
       th.style.width = `${columnSize(index)}px`
       th.style.height = `${this.columnHeaderHeight}px`
@@ -1048,6 +1513,7 @@ export class ColworkTable {
       th.append(letter)
       this.addResizeHandle(th, 'column', index)
       this.addHeaderSelection(th, 'column', index)
+      pin(th, -1, index)
       headerRow.append(th)
     }
     headerRow.append(columnSpacer(getViewportTotalSize(columnCount, columnSize) - getViewportOffset(view.right + 1, columnSize)))
@@ -1058,23 +1524,27 @@ export class ColworkTable {
       tr.className = 'colwork-table__spacer'
       tr.style.height = `${height}px`
       const td = document.createElement('td')
-      td.colSpan = view.right - view.left + 3
+      td.colSpan = columns.length + 2
       td.style.height = `${height}px`
       tr.append(td)
       return tr
     }
-    tbody.append(spacer(getViewportOffset(view.top, rowSize)))
-    for (let row = view.top; row <= view.bottom; row += 1) {
+    for (const row of rows) {
+      if (row === -1) { tbody.append(spacer(gapHeight)); continue }
       const tr = document.createElement('tr')
       if (this.bandedRows && row % 2 === 1) tr.className = 'is-banded-row'
       tr.style.height = `${rowSize(row)}px`
       const number = document.createElement('th'); number.style.width = `${this.rowHeaderWidth}px`; number.style.height = `${rowSize(row)}px`; number.style.fontSize = `${HEADER_FONT_SIZE * this.zoomRatio}px`; number.textContent = String(row + 1); this.addResizeHandle(number, 'row', row); this.addHeaderSelection(number, 'row', row); tr.append(number)
-      const leading = document.createElement('td')
-      leading.style.width = `${getViewportOffset(view.left, columnSize)}px`
-      leading.style.padding = '0'
-      leading.style.border = '0'
-      tr.append(leading)
-      for (let column = view.left; column <= view.right; column += 1) {
+      pin(number, row, -1)
+      for (const column of columns) {
+        if (column === -1) {
+          const leading = document.createElement('td')
+          leading.style.width = `${gapWidth}px`
+          leading.style.padding = '0'
+          leading.style.border = '0'
+          tr.append(leading)
+          continue
+        }
         if (this.isMergeCovered(row, column)) continue
         const key = cellKey({ row, column })
         const td = document.createElement('td')
@@ -1088,12 +1558,18 @@ export class ColworkTable {
         }
         const value = document.createElement('span')
         value.className = 'colwork-table__cell-value'
-        value.style.height = `${rowSize(row)}px`
-        value.style.maxHeight = `${rowSize(row)}px`
+        value.style.height = `${Math.max(0, rowSize(row) - 4)}px`
+        value.style.maxHeight = `${Math.max(0, rowSize(row) - 4)}px`
         value.textContent = this.displayValue(key)
         this.applyStyle(value, key)
         td.append(value)
         this.applyStyle(td, key)
+        pin(td, row, column)
+        const locked = this.isCellLocked(key)
+        td.classList.toggle('is-locked', locked)
+        td.classList.toggle('is-password-locked', this.isCellPasswordLocked(key))
+        td.setAttribute('aria-readonly', String(this.readOnly || locked))
+        if (locked) td.title = this.isCellPasswordLocked(key) ? '密码锁定：验证密码后可编辑' : '已锁定：解锁后可编辑'
         td.addEventListener('mousedown', (event) => {
           if (event.target instanceof HTMLTextAreaElement) return
           if (event.button !== 0 && event.button !== 2) return
@@ -1110,7 +1586,7 @@ export class ColworkTable {
           this.refreshSelection()
         })
         td.addEventListener('mouseenter', () => {
-          if (!this.selecting) return
+          if (!this.selecting || this.headerSelecting) return
           if (this.rightDrag) {
             if (this.rightDrag.start.row === row && this.rightDrag.start.column === column) return
             if (!this.rightDrag.moved) {
@@ -1141,8 +1617,26 @@ export class ColworkTable {
     this.table.classList.toggle('is-banded-rows', this.bandedRows)
     this.table.style.fontSize = `${this.zoomRatio}em`
     this.table.replaceChildren(thead, tbody)
+    this.refreshFrozenBoundaries()
     this.refreshSelection()
     this.refreshCursors()
+  }
+
+  private refreshFrozenBoundaries() {
+    this.viewport.querySelectorAll('.colwork-table__frozen-boundary').forEach(line => line.remove())
+    const add = (axis: 'row' | 'column', count: number, position: number, limit: number) => {
+      if (!count || position >= limit) return
+      const line = document.createElement('span')
+      line.className = `colwork-table__frozen-boundary colwork-table__frozen-boundary--${axis}`
+      line.setAttribute('aria-hidden', 'true')
+      line.style.left = `${this.viewport.scrollLeft + (axis === 'column' ? position - 1 : 0)}px`
+      line.style.top = `${this.viewport.scrollTop + (axis === 'row' ? position - 1 : 0)}px`
+      if (axis === 'column') line.style.height = `${this.viewport.clientHeight}px`
+      else line.style.width = `${this.viewport.clientWidth}px`
+      this.viewport.append(line)
+    }
+    add('row', this.frozenRows, this.columnHeaderHeight + getViewportOffset(this.frozenRows, row => this.getRowHeight(row)), this.viewport.clientHeight)
+    add('column', this.frozenColumns, this.rowHeaderWidth + getViewportOffset(this.frozenColumns, column => this.getColumnWidth(column)), this.viewport.clientWidth)
   }
 
   private refreshValues() {
@@ -1159,7 +1653,16 @@ export class ColworkTable {
 
   private refreshSelection() {
     this.viewport.querySelectorAll('.colwork-table__selection').forEach((selection) => selection.remove())
+    if (!this.selectionFocus) return
     const bounds = this.getSelectionBounds()
+    this.table.querySelectorAll<HTMLElement>('th[data-selection-axis]').forEach(header => {
+      const axis = header.dataset.selectionAxis
+      const index = Number(header.dataset.selectionIndex)
+      const selected = this.selectionMode === 'all' || (this.selectionMode === axis && (axis === 'row'
+        ? index >= bounds.top && index <= bounds.bottom
+        : index >= bounds.left && index <= bounds.right))
+      header.classList.toggle('is-selected-header', selected)
+    })
     this.addSelectionOverlay(selectionRange({ row: bounds.top, column: bounds.left }, { row: bounds.bottom, column: bounds.right }), 'colwork-table__selection', this.options.userColor ?? '#3b82f6', this.selectionMode)
   }
 
@@ -1188,6 +1691,10 @@ export class ColworkTable {
   }
 
   private addSelectionOverlay(range: ReturnType<typeof selectionRange>, className: string, color: string, mode?: SelectionMode) {
+    if (this.frozenRows || this.frozenColumns) {
+      this.addFrozenSelectionOverlay(range, className, color)
+      return
+    }
     const startRow = Math.max(0, Math.min(this.rowCount - 1, range.start.row))
     const startColumn = Math.max(0, Math.min(this.columnCount - 1, range.start.column))
     const endRow = Math.max(0, Math.min(this.rowCount - 1, range.end.row))
@@ -1254,6 +1761,40 @@ export class ColworkTable {
     this.viewport.append(overlay)
   }
 
+  private addFrozenSelectionOverlay(range: CellRange, className: string, color: string) {
+    const split = (start: number, end: number, frozen: number) => [
+      { start, end: Math.min(end, frozen - 1), fixed: true },
+      { start: Math.max(start, frozen), end, fixed: false },
+    ].filter((part) => part.start <= part.end)
+    const rowSize = (row: number) => this.getRowHeight(row)
+    const columnSize = (column: number) => this.getColumnWidth(column)
+    const frozenHeight = getViewportOffset(this.frozenRows, rowSize)
+    const frozenWidth = getViewportOffset(this.frozenColumns, columnSize)
+    for (const row of split(range.start.row, range.end.row, this.frozenRows)) {
+      for (const column of split(range.start.column, range.end.column, this.frozenColumns)) {
+        const x = this.viewport.scrollLeft
+        const y = this.viewport.scrollTop
+        const left = this.rowHeaderWidth + getViewportOffset(column.start, columnSize) + (column.fixed ? x : 0)
+        const top = this.columnHeaderHeight + getViewportOffset(row.start, rowSize) + (row.fixed ? y : 0)
+        const right = this.rowHeaderWidth + getViewportOffset(column.end + 1, columnSize) + (column.fixed ? x : 0)
+        const bottom = this.columnHeaderHeight + getViewportOffset(row.end + 1, rowSize) + (row.fixed ? y : 0)
+        const clippedLeft = Math.max(left, x + this.rowHeaderWidth + (column.fixed ? 0 : frozenWidth))
+        const clippedTop = Math.max(top, y + this.columnHeaderHeight + (row.fixed ? 0 : frozenHeight))
+        const clippedRight = Math.min(right, x + this.viewport.clientWidth)
+        const clippedBottom = Math.min(bottom, y + this.viewport.clientHeight)
+        if (clippedRight <= clippedLeft || clippedBottom <= clippedTop) continue
+        const overlay = document.createElement('span')
+        overlay.className = className
+        Object.assign(overlay.style, {
+          left: `${clippedLeft}px`, top: `${clippedTop}px`,
+          width: `${clippedRight - clippedLeft}px`, height: `${clippedBottom - clippedTop}px`,
+          zIndex: '6', borderColor: color, backgroundColor: colorWithAlpha(color, 0.1),
+        })
+        this.viewport.append(overlay)
+      }
+    }
+  }
+
   private addCursorLabel(cell: HTMLTableCellElement, state: any, clientId: number) {
     const marker = document.createElement('span')
     marker.className = 'colwork-table__remote-cursor'
@@ -1263,7 +1804,7 @@ export class ColworkTable {
   }
 
   private startEdit(cell: HTMLTableCellElement, key: string, announce = true) {
-    if (this.readOnly) return
+    if (this.readOnly || this.isCellLocked(key)) return
     if (this.editingKey === key) return
     this.finishEdit(true)
     const currentCell = Array.from(this.table.querySelectorAll<HTMLTableCellElement>('td[data-key]'))
@@ -1332,7 +1873,7 @@ export class ColworkTable {
   }
 
   private toggleFormat(format: BooleanStyleKey) {
-    if (this.readOnly || !this.selectedKey) return
+    if (this.readOnly || !this.selectedKey || this.selectionHasLocks()) return
     const { top, bottom, left, right } = this.getSelectionBounds()
     const current = this.readStyle(this.selectedKey)[format]
     this.doc.transact(() => {
@@ -1349,7 +1890,7 @@ export class ColworkTable {
   }
 
   private clearFormatting() {
-    if (this.readOnly || !this.selectedKey) return
+    if (this.readOnly || !this.selectedKey || this.selectionHasLocks()) return
     const { top, bottom, left, right } = this.getSelectionBounds()
     this.doc.transact(() => {
       for (let row = top; row <= bottom; row += 1) {
@@ -1360,7 +1901,7 @@ export class ColworkTable {
   }
 
   private toggleBorder(mode: BorderMode) {
-    if (this.readOnly || !this.selectedKey) return
+    if (this.readOnly || !this.selectedKey || this.selectionHasLocks()) return
     const { top, bottom, left, right } = this.getSelectionBounds()
     const sides = (row: number, column: number): Array<keyof CellBorder> => {
       const result: Array<keyof CellBorder> = []
@@ -1401,7 +1942,7 @@ export class ColworkTable {
   }
 
   private setStyle(format: 'color' | 'background' | 'align' | 'fontSize' | 'format', value: string | number | CellStyle['align'] | CellStyle['format']) {
-    if (this.readOnly || !this.selectedKey) return
+    if (this.readOnly || !this.selectedKey || this.selectionHasLocks()) return
     const { top, bottom, left, right } = this.getSelectionBounds()
     this.doc.transact(() => {
       for (let row = top; row <= bottom; row += 1) {
@@ -1425,7 +1966,10 @@ export class ColworkTable {
       if (cell.dataset.key) {
         this.applyStyle(cell, cell.dataset.key)
         const value = cell.querySelector<HTMLElement>('.colwork-table__cell-value')
-        if (value) this.applyStyle(value, cell.dataset.key)
+        if (value) {
+          this.applyStyle(value, cell.dataset.key)
+          value.textContent = this.displayValue(cell.dataset.key)
+        }
       }
     })
   }
@@ -1433,14 +1977,17 @@ export class ColworkTable {
   private finishEdit(commit: boolean) {
     if (!this.editor || !this.editingKey) return
     const key = this.editingKey
-    const nextValue = commit ? this.editor.value : this.editingOriginal
-    if (nextValue !== this.cells.get(key)) this.cells.set(key, nextValue)
-    const awarenessState = this.awareness.getLocalState() ?? {}
-    this.awareness.setLocalState({ ...awarenessState, editing: null })
-    this.editor.remove()
+    const editor = this.editor
+    const nextValue = commit ? editor.value : this.editingOriginal
+    // Removing a focused textarea fires blur synchronously. Clear state first to
+    // keep the blur handler from re-entering and removing the same editor twice.
     this.editor = undefined
     this.editingKey = undefined
     this.editingOriginal = ''
+    if (!this.isCellLocked(key) && nextValue !== this.cells.get(key)) this.cells.set(key, nextValue)
+    const awarenessState = this.awareness.getLocalState() ?? {}
+    this.awareness.setLocalState({ ...awarenessState, editing: null })
+    editor.remove()
     const cell = this.table.querySelector<HTMLTableCellElement>(`td[data-key="${key}"]`)
     if (!cell) {
       this.render()
@@ -1461,6 +2008,10 @@ export class ColworkTable {
   }
 
   destroy() {
+    this.destroyed = true
+    this.viewportResizeObserver.disconnect()
+    this.closeLockMessage()
+    this.passwordDialog?.close()
     this.finishEdit(true)
     this.doc.off('update', this.onDocUpdate)
     this.awareness.off('update', this.onAwarenessUpdate)
@@ -1470,6 +2021,7 @@ export class ColworkTable {
     this.rowHeights.unobserve(this.onSizesChange)
     this.columnWidths.unobserve(this.onSizesChange)
     this.merges.unobserve(this.onMergesChange)
+    this.locks.unobserve(this.onLocksChange)
     this.undoManager.off('stack-item-added', this.onHistoryChange)
     this.undoManager.off('stack-item-popped', this.onHistoryChange)
     this.undoManager.off('stack-cleared', this.onHistoryChange)
@@ -1481,6 +2033,7 @@ export class ColworkTable {
     this.table.removeEventListener('mousedown', this.onTableMouseDown)
     window.removeEventListener('mouseup', this.onWindowMouseUp)
     window.removeEventListener('mousemove', this.onWindowMouseMove)
+    window.removeEventListener('blur', this.onWindowBlur)
     document.removeEventListener('mousedown', this.onDocumentMouseDown)
     this.hideContextMenu()
     if (this.renderFrame !== undefined) cancelAnimationFrame(this.renderFrame)

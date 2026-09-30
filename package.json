@@ -10,7 +10,8 @@
     "server:test": "node server/index.mjs --mode test",
     "rebuild:yjs": "node script/rebuild-yjs.mjs",
     "build": "npm run build:lib",
-    "build:lib": "tsc --noEmit && vite build --config vite.lib.config.ts"
+    "build:lib": "tsc --noEmit && vite build --config vite.lib.config.ts",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.4.1",
@@ -25,6 +26,7 @@
     "yjs": "^13.6.27"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
     "typescript": "^5.8.3",
