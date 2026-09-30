@@ -2,6 +2,10 @@
 
 基于 Yjs 的多人协作表格前端库，使用原生 DOM 渲染，提供 Vue / React 演示页。
 
+示例地址
+
+![demo.png](docs/demo.png)
+
 ## 开发
 
 ```sh
@@ -14,6 +18,97 @@ npm run dev
 - 快照与更新日志工具：<http://127.0.0.1:5173/test/index.html>
 
 `npm run build` 执行 TypeScript 检查并构建 ES / UMD 库。
+
+## Cloudflare 部署
+
+使用两个独立 Worker，部署目标为：
+
+| 服务 | Worker | 自定义域名 |
+| --- | --- | --- |
+| 前端 | `colwork-frontend` | `colwork.kuzuma.asia` |
+| 后端 | `colwork-backend` | `api.colwork.kuzuma.asia` |
+
+前端通过 Workers Static Assets 托管网站。`/api/*`、`/rooms/*` 和 `/health` 通过 `BACKEND` 服务绑定转发到后端，浏览器使用前端同源的 HTTPS/WSS，不需要配置跨域请求。后端自定义域名也提供 HTTP 接口和 WebSocket。
+
+后端每个房间对应一个 SQLite Durable Object，处理 Yjs 同步、在线状态和文档持久化。每次更新保存完整 Yjs 状态，按 64 KiB 分块写入同一个 SQLite 事务；所有客户端离开或 Worker 重启后，内容、格式、合并、行列尺寸和锁定记录仍保留。在线状态只保存在连接附件中，断开后移除；固定范围继续是客户端本地状态。此版本适合现有演示规模，较大文档每次更新重写快照的开销需要后续优化。
+
+### 首次部署
+
+需要 Node.js 22 或更高版本，以及已将 `kuzuma.asia` 托管到 Cloudflare 的账号。SQLite Durable Objects 的套餐与用量以 [Cloudflare 官方说明](https://developers.cloudflare.com/durable-objects/platform/pricing/) 为准。
+
+```sh
+npm ci
+npm run deploy
+```
+
+一条命令自动完成：检查 Git 忽略状态 → 缺少配置时从模板生成本地 `deploy.env` → 构建与类型检查 → 检查已有授权 → 必要时打开 Wrangler OAuth → 选择唯一账号 → 发布后端和前端、绑定域名 → 验证 HTTP、网站资产和 WSS 协作握手。首次 OAuth 仍需本人在浏览器中授权，后续部署复用授权。
+
+本机已生成 `config/cloudflare/deploy.env` 时直接编辑，脚本保留现有内容并将文件权限设为仅当前用户读写。默认包含上述两个域名；如账号下有多个账户，在文件中设置 `CLOUDFLARE_ACCOUNT_ID`，脚本会在发布前停止，避免自动选错账号。可以运行 `npx wrangler whoami` 查看账号。
+
+```sh
+npm run deploy:check
+npm run deploy
+```
+
+`deploy:check` 构建前端并检查两个 Worker 的打包结果，不请求登录、不发布、不创建线上存储，也不验证域名归属。`deploy` 先发布后端及 Durable Object 迁移，再发布前端并关联服务绑定，同时添加两个自定义域名。自定义域名需要属于当前账号的 Cloudflare Zone；已有同名 DNS 记录时，先核对其用途再处理冲突，见 [Custom Domains 文档](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)。
+
+取消或拒绝 OAuth 会在发布任何 Worker 前终止。CI 或 `npm run deploy -- --no-login` 不会打开浏览器，缺少有效凭据时直接失败。域名刚绑定后，验证会短暂重试；超时会明确报告“已发布但验证失败”，不会报告部署成功，也不会自动删除或回滚房间存储。后端已发布而前端发布失败时，修正问题后重新运行同一命令即可。
+
+自动化环境可通过环境变量提供 `CLOUDFLARE_API_TOKEN` 和 `CLOUDFLARE_ACCOUNT_ID`。Token 需要对目标账户部署 Workers、Durable Objects 和服务绑定的权限，以及目标 Zone 管理部署域名所需权限；不要提交 Token。环境变量优先于 `deploy.env`，也可通过 `CF_DEPLOY_CONFIG` 指定另一个配置文件。
+
+OAuth 是 [Wrangler 的部署授权](https://developers.cloudflare.com/workers/wrangler/commands/general/)，不是表格应用的用户登录。凭据由 Wrangler 的用户凭据存储管理，脚本不读取或导出 Token。部署配置与结果只包含必要的 Worker 名称、账号 ID、域名和验证时间，不会序列化环境变量。账号 ID 和域名不属于认证秘密。
+
+`.gitignore` 排除 `.wrangler/`（生成配置、部署结果、本地数据和日志）、`config/cloudflare/*.env`、`.env*`、`.dev.vars*`、`site-dist/`、`site-dist*.zip` 和 Worker 打包结果；无秘密的 `.example` 模板可提交。部署前检查这些路径是否已被 Git 跟踪，并检查项目内指定的配置文件是否确实被忽略；检查失败就停止部署。使用 `CF_DEPLOY_CONFIG` 指定项目内的新路径时，也必须先将其加入忽略规则。
+
+如只想使用 `workers.dev`，将两个 `CF_*_CUSTOM_DOMAIN` 值留空。变更 Worker 名称时，脚本会同步更新前端服务绑定；已经有线上数据后应保持后端名称和 Durable Object 类名不变，避免连接到新的存储空间。
+
+### 发布后检查
+
+```sh
+curl https://colwork.kuzuma.asia/health
+curl https://api.colwork.kuzuma.asia/health
+```
+
+前端首页是 Vue 表格，React 位于 `/test/react.html`，离线快照工具位于 `/test/index.html`。Vue 和 React 均使用 `colwork-demo` 房间，可打开两个浏览器窗口验证内容、格式和锁定同步。关闭全部窗口再打开，验证持久化。密码锁定在 HTTPS 下可使用 Web Crypto。
+
+部署脚本会自动检查两个域名的健康接口、前端首页资产引用和 WSS 的 Yjs 握手，WSS 检查不发送编辑。全部检查通过后，最后一次成功结果保存在被忽略的 `.wrangler/deploy-result.json`。
+
+线上版本使用 WebSocket，不启动原有 Node 服务，不依赖本机 1234/4444 端口；`?transport=webrtc` 不会切换线上传输方式。本地 `npm run dev` 仍保留原有 WebRTC 实验方式。
+
+### 本地运行与测试
+
+```sh
+npm run dev:cloudflare
+```
+
+Wrangler 本地运行网站、Worker 和 Durable Objects，默认地址为 `http://localhost:8787`，持久化目录为 `.wrangler/state`。删除此目录会清空本地数据，不影响线上数据。
+
+```sh
+npm run build:site
+npx playwright install chromium
+npm run test:cloudflare
+npm run test:e2e
+```
+
+Cloudflare 测试在真实本地 Workers 运行时中启动两个独立 Worker，验证 HTTP、服务绑定、WebSocket、房间隔离、在线状态、Vue/React 协作、清空后刷新及超过 128 KiB 文档的重启恢复。测试使用临时目录，不影响开发或线上数据。可设置 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 使用本机 Chrome。
+
+同一测试命令也运行部署流程测试：通过模拟 Cloudflare CLI 验证自动 OAuth、取消授权、CI、账号选择、发布顺序、Git 跟踪检查及 Token 不落入生成配置。这些流程测试不请求实际 OAuth、不发布线上 Worker。
+
+### 代码入口
+
+- `vite.site.config.ts`：部署网站构建，与 ES/UMD 库构建分开。
+- `server/cloudflare/frontend.mjs`：静态资产与同源代理。
+- `server/cloudflare/backend.mjs`：请求路由、房间 Durable Object、SQLite 持久化。
+- `server/cloudflare/protocol.mjs`：Yjs 二进制同步协议及在线状态。
+- `config/cloudflare/wrangler.*.json`：前端、后端及本地单 Worker 配置。
+- `script/deploy-cloudflare.mjs`：读取配置、构建、按顺序部署并绑定域名。
+- `test/user-settings.ts`：部署版本使用同源 API 与 WSS。
+
+有持久化后端时，`ColworkTable` 使用 `initializeAfterSync: true`：先接收服务端状态，再为尚未初始化的空房间填入示例数据，初始化标记随文档保存，已清空的房间不会在刷新时重新填入示例。WebSocket URL 的查询参数独立传给 Provider，房间名编码后作为路径，避免查询参数与房间路径拼接错误。
+
+部署沿用现有演示的公开房间模型。密码锁定是客户端防误改，服务端未新增账号权限或内容加密，详情见下方「固定与锁定」说明。
+
+实现参考了 csBoard 的双 Worker 架构，协议模块按 Colwork 的 Yjs 客户端独立实现。平台接口参见 [WebSocket Hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/)、[SQLite Storage API](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/) 和 [Static Assets Binding](https://developers.cloudflare.com/workers/static-assets/binding/)。
 
 ## 工具栏与菜单
 
@@ -58,5 +153,3 @@ npm run test:e2e
 ```
 
 测试自动启动独立的 Vite 和临时 WebSocket 服务，覆盖固定、锁定、跨客户端同步和存档恢复。也可通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指定本机 Chrome 可执行文件。
-
-核心代码阅读说明见 [CORE.md](CORE.md)，方案讨论见 [DESIGN.md](DESIGN.md)。

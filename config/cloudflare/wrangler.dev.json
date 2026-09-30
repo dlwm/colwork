@@ -1,0 +1,9 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "colwork-dev",
+  "main": "../../server/cloudflare/backend.mjs",
+  "compatibility_date": "2026-09-30",
+  "assets": { "directory": "../../site-dist", "binding": "ASSETS", "not_found_handling": "404-page", "run_worker_first": ["/api/*", "/rooms/*", "/health"] },
+  "durable_objects": { "bindings": [{ "name": "ROOMS", "class_name": "ColworkRoom" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ColworkRoom"] }]
+}

@@ -1,0 +1,8 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "colwork-frontend",
+  "main": "../../server/cloudflare/frontend.mjs",
+  "compatibility_date": "2026-09-30",
+  "assets": { "directory": "../../site-dist", "binding": "ASSETS", "not_found_handling": "404-page", "run_worker_first": ["/api/*", "/rooms/*", "/health"] },
+  "services": [{ "binding": "BACKEND", "service": "colwork-backend" }]
+}

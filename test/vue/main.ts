@@ -3,10 +3,10 @@ import { ColworkTable } from '../../src'
 import { classifyLog, formatLog, loadLogTypes, logTypes, saveLogTypes, type LogEntry, type LogType } from '../log'
 import { splitHexGroups, splitLogText } from '../identifiers'
 import { downloadJson } from '../archive'
-import { loadUserSettings, saveUserSettings, websocketUrl, type UserSettings } from '../user-settings'
+import { loadUserSettings, saveUserSettings, websocketUrl, collaborationTransport, cloudflareDeployment, type UserSettings } from '../user-settings'
 import '../test.css'
 
-const transport = new URLSearchParams(location.search).get('transport') === 'webrtc' ? 'webrtc' : 'websocket'
+const transport = collaborationTransport()
 const initialUserSettings = loadUserSettings('vue')
 
 const App = defineComponent({
@@ -56,7 +56,7 @@ const App = defineComponent({
     }
     const mountTable = () => {
       table?.destroy()
-      if (tableRoot.value) table = new ColworkTable(tableRoot.value, { room: 'colwork-demo', user: applied.value.nickname, userColor: applied.value.color, transport, websocketUrl: websocketUrl(applied.value), onLog: appendLog })
+      if (tableRoot.value) table = new ColworkTable(tableRoot.value, { room: 'colwork-demo', user: applied.value.nickname, userColor: applied.value.color, transport, initializeAfterSync: cloudflareDeployment, websocketUrl: websocketUrl(applied.value), onLog: appendLog })
     }
     const applySettings = async () => {
       applied.value = { ...draft.value, delay: Math.max(0, Math.min(30000, Number(draft.value.delay) || 0)) }

@@ -4,10 +4,10 @@ import { ColworkTable } from '../../src'
 import { classifyLog, formatLog, loadLogTypes, logTypes, saveLogTypes, type LogEntry, type LogType } from '../log'
 import { splitHexGroups, splitLogText } from '../identifiers'
 import { downloadJson } from '../archive'
-import { loadUserSettings, saveUserSettings, websocketUrl, type UserSettings } from '../user-settings'
+import { loadUserSettings, saveUserSettings, websocketUrl, collaborationTransport, cloudflareDeployment, type UserSettings } from '../user-settings'
 import '../test.css'
 
-const transport = new URLSearchParams(location.search).get('transport') === 'webrtc' ? 'webrtc' : 'websocket'
+const transport = collaborationTransport()
 const initialUserSettings = loadUserSettings('react')
 
 function App() {
@@ -35,7 +35,7 @@ function App() {
     let table: ColworkTable | undefined
     saveUserSettings(applied, 'react').catch(() => undefined).finally(() => {
        if (active && tableRoot.current) {
-         table = new ColworkTable(tableRoot.current, { room: 'colwork-demo', user: applied.nickname, userColor: applied.color, transport, websocketUrl: websocketUrl(applied), onLog: appendLog })
+         table = new ColworkTable(tableRoot.current, { room: 'colwork-demo', user: applied.nickname, userColor: applied.color, transport, initializeAfterSync: cloudflareDeployment, websocketUrl: websocketUrl(applied), onLog: appendLog })
          tableRef.current = table
        }
     })

@@ -23,6 +23,7 @@ export type ColworkTableOptions = {
   peerOpts?: Record<string, unknown>
   transport?: 'webrtc' | 'websocket'
   websocketUrl?: string
+  initializeAfterSync?: boolean
   readOnly?: boolean
   snapshot?: Uint8Array
   updates?: Uint8Array[]
@@ -246,11 +247,14 @@ export class ColworkTable {
     this.rowCountValue = Math.max(options.rowCount ?? 100, options.rows?.length ?? defaultRows.length)
     this.columnCountValue = Math.max(options.columnCount ?? 10, headers.length)
     const useWebrtc = options.transport === 'webrtc'
+    const socketURL = new URL(options.websocketUrl ?? 'ws://127.0.0.1:1234')
+    const socketParams = Object.fromEntries(socketURL.searchParams)
+    socketURL.search = ''
     if (this.readOnly) {
       this.awareness = new Awareness(this.doc)
     } else {
       this.provider = !useWebrtc
-        ? new WebsocketProvider(options.websocketUrl ?? 'ws://127.0.0.1:1234', options.room, this.doc)
+        ? new WebsocketProvider(socketURL.toString().replace(/\/$/, ''), encodeURIComponent(options.room), this.doc, { params: socketParams, connect: !options.initializeAfterSync })
         : new WebrtcProvider(options.room, this.doc, {
             signaling: [options.signalingUrl ?? 'ws://127.0.0.1:4444'],
             filterBcConns: false,
@@ -500,8 +504,8 @@ export class ColworkTable {
 
     const shouldSeed = !this.readOnly && !options.snapshot && !options.updates?.length
     const shouldSeedDemo = shouldSeed && this.cells.size === 0 && this.locks.size === 0
-    if (shouldSeed) this.seed(options.rows ?? defaultRows)
-    if (shouldSeedDemo) this.seedDemoFormatting()
+    if (shouldSeed && !options.initializeAfterSync) this.seed(options.rows ?? defaultRows)
+    if (shouldSeedDemo && !options.initializeAfterSync) this.seedDemoFormatting()
     this.expandLogicalSizeFromDocument()
     this.undoManager = new Y.UndoManager([this.cells, this.styles, this.rowHeights, this.columnWidths, this.merges], { captureTimeout: 500 })
     this.undoManager.on('stack-item-added', this.onHistoryChange)
@@ -523,7 +527,25 @@ export class ColworkTable {
         this.log(connected === true || status === 'connected' ? 'signaling:connected' : 'signaling:disconnected')
         if (useWebrtc) this.inspectConnections()
       })
-      providerEvents.on('synced', ({ synced }) => this.log(synced ? 'synced' : 'syncing'))
+      if (!useWebrtc) providerEvents.on('sync', (synced: boolean) => {
+        this.log(synced ? 'synced' : 'syncing')
+        if (!synced || !options.initializeAfterSync) return
+        const metadata = this.doc.getMap<boolean>('colwork-metadata')
+        if (!metadata.get('initialized')) {
+          this.doc.transact(() => {
+            if (shouldSeed && this.cells.size === 0 && this.locks.size === 0) {
+              this.seed(options.rows ?? defaultRows)
+              this.seedDemoFormatting()
+            }
+            metadata.set('initialized', true)
+          })
+          this.undoManager.clear()
+        }
+        this.expandLogicalSizeFromDocument()
+        this.render()
+      })
+      else providerEvents.on('synced', ({ synced }) => this.log(synced ? 'synced' : 'syncing'))
+      if (options.initializeAfterSync && this.provider instanceof WebsocketProvider) this.provider.connect()
       if (useWebrtc) {
         providerEvents.on('peers', ({ added, removed, webrtcPeers }) => {
           if (added.length) this.log(`peer:+${added.length}`)

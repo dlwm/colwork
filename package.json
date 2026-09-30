@@ -11,11 +11,17 @@
     "rebuild:yjs": "node script/rebuild-yjs.mjs",
     "build": "npm run build:lib",
     "build:lib": "tsc --noEmit && vite build --config vite.lib.config.ts",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "build:site": "tsc --noEmit && vite build --config vite.site.config.ts",
+    "dev:cloudflare": "npm run build:site && wrangler dev --config config/cloudflare/wrangler.dev.json --persist-to .wrangler/state",
+    "deploy:check": "node script/deploy-cloudflare.mjs --dry-run",
+    "deploy": "node script/deploy-cloudflare.mjs",
+    "test:cloudflare": "node --test test/cloudflare/*.test.mjs"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.4.1",
     "@vitejs/plugin-vue": "^5.2.3",
+    "lib0": "^0.2.119",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "vue": "^3.5.13",
@@ -30,6 +36,7 @@
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
     "typescript": "^5.8.3",
-    "vite": "^6.3.5"
+    "vite": "^6.3.5",
+    "wrangler": "^4.145.0"
   }
 }

@@ -1,3 +1,5 @@
+declare const __COLWORK_CLOUDFLARE__: boolean
+export const cloudflareDeployment = typeof __COLWORK_CLOUDFLARE__ !== 'undefined' && __COLWORK_CLOUDFLARE__
 export type UserSettings = { id: string; nickname: string; color: string; delay: number }
 
 const storageKey = 'colwork-user-settings'
@@ -23,9 +25,15 @@ export function loadUserSettings(scope = 'default'): UserSettings {
 
 export async function saveUserSettings(settings: UserSettings, scope = 'default') {
   localStorage.setItem(`${storageKey}-${scope}`, JSON.stringify(settings))
-  await fetch('http://127.0.0.1:4444/api/users', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(settings) })
+  const response = await fetch(cloudflareDeployment ? '/api/users' : 'http://127.0.0.1:4444/api/users', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(settings) })
+  if (!response.ok) throw new Error('用户设置保存失败')
 }
 
 export function websocketUrl(settings: UserSettings) {
+  if (cloudflareDeployment) return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/rooms?userId=${encodeURIComponent(settings.id)}`
   return `ws://127.0.0.1:1234?userId=${encodeURIComponent(settings.id)}`
+}
+
+export function collaborationTransport() {
+  return !cloudflareDeployment && new URLSearchParams(location.search).get('transport') === 'webrtc' ? 'webrtc' : 'websocket'
 }

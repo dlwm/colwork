@@ -542,7 +542,7 @@ test('frozen boundaries follow panes and grouped controls fit desktop and narrow
   await expect(menu).toHaveCount(0)
   await page.setViewportSize({ width: 390, height: 700 })
   await page.evaluate(() => { document.querySelector('#table').style.width = '100%'; table.setFrozenPanes(1, 0) })
-  await expect.poll(() => horizontal.evaluate(element => Math.round(element.getBoundingClientRect().width))).toBe(388)
+  await expect.poll(() => horizontal.evaluate(element => Math.round(element.getBoundingClientRect().width) - table.viewport.clientWidth)).toBe(0)
   const overflow = await page.locator('.colwork-table__toolbar').evaluate(toolbar => {
     const bounds = toolbar.getBoundingClientRect()
     return [...toolbar.querySelectorAll('button, select, input')].filter(control => {
@@ -571,6 +571,7 @@ test('frozen and unfrozen headers remain resizable and cells remain editable', a
   await page.evaluate(() => table.setFrozenPanes(2, 3))
   const resize = async (axis, index, delta) => {
     const selector = `th[data-selection-axis="${axis}"][data-selection-index="${index}"] .colwork-table__resize-handle`
+    await expect(page.locator(selector)).toBeVisible()
     const handle = await page.locator(selector).boundingBox()
     const x = handle.x + handle.width / 2
     const y = handle.y + handle.height / 2
