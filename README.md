@@ -14,6 +14,7 @@ npm run dev
 ```
 
 - Vue：<http://127.0.0.1:5173/test/vue.html>
+- 示例首页：<http://127.0.0.1:5173/>
 - React：<http://127.0.0.1:5173/test/react.html>
 - 快照与更新日志工具：<http://127.0.0.1:5173/test/index.html>
 
@@ -69,7 +70,7 @@ curl https://colwork.kuzuma.asia/health
 curl https://api.colwork.kuzuma.asia/health
 ```
 
-前端首页是 Vue 表格，React 位于 `/test/react.html`，离线快照工具位于 `/test/index.html`。Vue 和 React 均使用 `colwork-demo` 房间，可打开两个浏览器窗口验证内容、格式和锁定同步。关闭全部窗口再打开，验证持久化。密码锁定在 HTTPS 下可使用 Web Crypto。
+前端首页展示项目介绍、仓库地址、Vue / React 示例入口及引入配置代码。Vue 位于 `/test/vue.html`，React 位于 `/test/react.html`，两个示例页左上角可返回首页；离线快照工具位于 `/test/index.html`。Vue 和 React 均使用 `colwork-demo` 房间，可打开两个浏览器窗口验证内容、格式和锁定同步。关闭全部窗口再打开，验证持久化。密码锁定在 HTTPS 下可使用 Web Crypto。
 
 部署脚本会自动检查两个域名的健康接口、前端首页资产引用和 WSS 的 Yjs 握手，WSS 检查不发送编辑。全部检查通过后，最后一次成功结果保存在被忽略的 `.wrangler/deploy-result.json`。
 

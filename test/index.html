@@ -3,25 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Colwork Yjs Tools</title>
+    <title>Colwork · 快照工具</title>
   </head>
   <body class="viewer-page">
     <main class="viewer-shell">
-      <section class="viewer-card">
-        <div class="viewer-header">
-          <div class="viewer-title-block">
-            <p class="viewer-kicker">COLWORK / YJS TOOLS</p>
-            <h1>快照重建与查看</h1>
-            <p>拖拽文件或直接粘贴 JSON，重建最新数据后以只读方式查看。</p>
-          </div>
-          <div class="viewer-header-actions"><span class="viewer-mode">离线工具 · 不连接协作房间</span><button id="rebuild-button" class="viewer-action" type="button">重建最新快照</button></div>
-        </div>
+      <nav class="viewer-nav" aria-label="页面导航"><a href="/">← 首页</a><a href="/test/vue.html">Vue 示例</a><a href="/test/react.html">React 示例</a></nav>
+      <section aria-labelledby="viewer-title">
+        <header class="viewer-header"><h1 id="viewer-title">快照工具</h1><span class="viewer-mode">离线读取，不连接协作房间</span></header>
+        <p class="viewer-description">从快照和更新日志重建数据，也可以直接查看已有快照。</p>
         <div class="viewer-input-grid">
-          <label class="viewer-input-card"><span class="viewer-panel-heading"><strong><i>01</i>快照数据</strong><small>可选</small></span><textarea id="snapshot-input" placeholder="粘贴 colwork.snapshot.json 或 archive JSON"></textarea><span id="snapshot-drop" class="viewer-drop-zone">拖放快照文件到这里</span></label>
-          <label class="viewer-input-card"><span class="viewer-panel-heading"><strong><i>02</i>Update Log</strong><small>可选</small></span><textarea id="updates-input" placeholder="粘贴 colwork.update-log.json 或 archive JSON"></textarea><span id="updates-drop" class="viewer-drop-zone">拖放 update log 文件到这里</span></label>
+          <label class="viewer-input-card"><span class="viewer-panel-heading">快照 <small>可选</small></span><textarea spellcheck="false" id="snapshot-input" placeholder="粘贴 colwork.snapshot.json 或 archive JSON"></textarea><span id="snapshot-drop" class="viewer-drop-zone">拖入快照 JSON 文件</span></label>
+          <label class="viewer-input-card"><span class="viewer-panel-heading">更新日志 <small>可选</small></span><textarea spellcheck="false" id="updates-input" placeholder="粘贴 colwork.update-log.json 或 archive JSON"></textarea><span id="updates-drop" class="viewer-drop-zone">拖入更新日志 JSON 文件</span></label>
         </div>
-        <div class="viewer-output-row"><span class="viewer-panel-heading"><strong><i>03</i>最新快照</strong><small>输出</small></span><textarea id="output-input" class="viewer-output" placeholder="重建结果会出现在这里，也可以手动粘贴快照"></textarea><div class="viewer-actions"><button id="show-button" class="viewer-action" type="button">展示只读表格</button><button id="download-button" class="viewer-action viewer-action--muted" type="button">下载快照</button></div></div>
-        <p id="viewer-status" class="viewer-status">等待输入</p>
+        <div class="viewer-actions"><button id="rebuild-button" class="viewer-action viewer-action--primary" type="button">重建快照</button></div>
+        <div class="viewer-output-row"><label for="output-input" class="viewer-panel-heading">重建结果</label><textarea spellcheck="false" id="output-input" class="viewer-output" placeholder="重建后的快照，也可粘贴已有快照直接查看"></textarea><div class="viewer-actions"><button id="show-button" class="viewer-action" type="button">查看表格</button><button id="download-button" class="viewer-action" type="button">下载快照</button></div></div>
+        <p id="viewer-status" class="viewer-status" role="status" aria-live="polite">等待输入</p>
         <div id="table-root" class="viewer-table"></div>
       </section>
     </main>

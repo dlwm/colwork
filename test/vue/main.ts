@@ -75,6 +75,7 @@ const App = defineComponent({
           h('button', { type: 'button', onClick: applySettings }, '应用'),
           h('button', { type: 'button', onClick: () => table && downloadJson('colwork.snapshot.json', table.getYjsSnapshot()) }, '导出快照'),
           h('button', { type: 'button', onClick: () => table && downloadJson('colwork.update-log.json', table.getYjsUpdateLog()) }, '导出更新日志'),
+          h('a', { class: 'user-settings__tool-link', href: '/test/index.html' }, '快照工具'),
       ]),
       h('div', { ref: tableRoot }),
       h('div', { class: 'log-toolbar' }, [
