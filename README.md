@@ -154,3 +154,7 @@ npm run test:e2e
 ```
 
 测试自动启动独立的 Vite 和临时 WebSocket 服务，覆盖固定、锁定、跨客户端同步和存档恢复。也可通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指定本机 Chrome 可执行文件。
+
+## License
+
+本项目采用 [MIT License](LICENSE)，版权归属 © 2026 dlwm。
