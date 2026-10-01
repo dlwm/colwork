@@ -28,11 +28,170 @@ async function mount(page, room = `test-${Date.now()}`) {
   }, { room, websocketUrl })
 }
 const cell = (page, key) => page.locator(`td[data-key="${key}"]`)
+async function selectionEdges(page, selector = '.colwork-table__selection') {
+  return page.locator(selector).evaluateAll(elements => {
+    const boxes = elements.map(element => element.getBoundingClientRect())
+    return { left: Math.min(...boxes.map(box => box.left)), top: Math.min(...boxes.map(box => box.top)), right: Math.max(...boxes.map(box => box.right)), bottom: Math.max(...boxes.map(box => box.bottom)) }
+  })
+}
 async function select(page, key) { await cell(page, key).click() }
 async function protectionAction(page, label) {
   await page.getByRole('button', { name: '保护', exact: true }).click()
   await page.locator('.colwork-table__context-menu').getByRole('button', { name: `${label}选区`, exact: true }).click()
 }
+
+test('selection reaches actual cell edges with merged endpoints, narrow columns, zoom and borders', async ({ page }) => {
+  await mount(page)
+  await page.evaluate(() => {
+    table.columnCountValue = 6
+    table.doc.transact(() => { for (let index = 0; index < 6; index++) table.columnWidths.set(String(index), 64) })
+    table.selectRange({ row: 5, column: 0 }, { row: 5, column: 2 })
+  })
+  const checkMerged = async () => {
+    const merged = await cell(page, '5:0').boundingBox()
+    const overlay = await selectionEdges(page)
+    expect(Math.abs(overlay.left - merged.x)).toBeLessThan(0.6)
+    expect(Math.abs(overlay.right - merged.x - merged.width)).toBeLessThan(0.6)
+    expect(Math.abs(overlay.top - merged.y)).toBeLessThan(0.6)
+    expect(Math.abs(overlay.bottom - merged.y - merged.height)).toBeLessThan(0.6)
+  }
+  await checkMerged()
+  await page.evaluate(() => {
+    table.viewport.dispatchEvent(new WheelEvent('wheel', { ctrlKey: true, deltaY: -100, cancelable: true }))
+    table.toggleBorder('outer')
+  })
+  await checkMerged()
+  await page.evaluate(() => {
+    table.setFrozenPanes(2, 3)
+    table.selectRange({ row: 0, column: 0 }, { row: 1, column: 4 })
+  })
+  const first = await cell(page, '0:0').boundingBox()
+  const last = await cell(page, '1:4').boundingBox()
+  const overlay = await selectionEdges(page)
+  expect(Math.abs(overlay.left - first.x)).toBeLessThan(0.6)
+  expect(Math.abs(overlay.top - first.y)).toBeLessThan(0.6)
+  expect(Math.abs(overlay.right - last.x - last.width)).toBeLessThan(0.6)
+  expect(Math.abs(overlay.bottom - last.y - last.height)).toBeLessThan(0.6)
+})
+
+test('frozen selection follows native scrolling before the queued virtual render', async ({ page }) => {
+  await mount(page)
+  await page.evaluate(() => {
+    table.setFrozenPanes(2, 3)
+    table.selectRange({ row: 0, column: 0 }, { row: 1, column: 2 })
+  })
+  const differences = await page.evaluate(() => {
+    // Delay the expensive virtual render, as can happen during a busy frame.
+    const original = window.requestAnimationFrame
+    window.requestAnimationFrame = () => 0
+    try {
+      table.viewport.scrollLeft = 600
+      table.viewport.scrollTop = 800
+      table.viewport.dispatchEvent(new Event('scroll'))
+      const first = document.querySelector('td[data-key="0:0"]').getBoundingClientRect()
+      const last = document.querySelector('td[data-key="1:2"]').getBoundingClientRect()
+      const boxes = [...document.querySelectorAll('.colwork-table__selection')].map(element => element.getBoundingClientRect())
+      return [Math.min(...boxes.map(box => box.left)) - first.left, Math.min(...boxes.map(box => box.top)) - first.top, Math.max(...boxes.map(box => box.right)) - last.right, Math.max(...boxes.map(box => box.bottom)) - last.bottom]
+    } finally { window.requestAnimationFrame = original; table.renderFrame = undefined }
+  })
+  for (const difference of differences) expect(Math.abs(difference)).toBeLessThan(0.6)
+})
+
+test('frozen boundary lines stay anchored before scroll handlers or virtual rendering run', async ({ page }) => {
+  await mount(page)
+  await page.evaluate(() => table.setFrozenPanes(2, 3))
+  const changes = await page.evaluate(() => {
+    const row = document.querySelector('.colwork-table__frozen-boundary--row')
+    const column = document.querySelector('.colwork-table__frozen-boundary--column')
+    const beforeRow = row.getBoundingClientRect()
+    const beforeColumn = column.getBoundingClientRect()
+    // Reproduce compositor scrolling while JavaScript is still busy. No scroll
+    // handler or requestAnimationFrame has a chance to correct either line.
+    table.viewport.scrollTop = 800
+    table.viewport.scrollLeft = 600
+    const afterRow = row.getBoundingClientRect()
+    const afterColumn = column.getBoundingClientRect()
+    return [afterRow.x - beforeRow.x, afterRow.y - beforeRow.y,
+      afterColumn.x - beforeColumn.x, afterColumn.y - beforeColumn.y,
+      afterRow.width - beforeRow.width, afterColumn.height - beforeColumn.height]
+  })
+  for (const change of changes) expect(Math.abs(change)).toBeLessThan(0.6)
+})
+
+test('local and remote highlights stay attached across frozen panes and header selection modes', async ({ page, browser }, testInfo) => {
+  const room = `native-selection-${Date.now()}`
+  await mount(page, room)
+  const context = await browser.newContext()
+  const peer = await context.newPage()
+  await mount(peer, room)
+  await page.evaluate(() => {
+    table.setFrozenPanes(2, 3)
+    table.selectRange({ row: 0, column: 0 }, { row: 12, column: 5 })
+  })
+  await peer.evaluate(() => {
+    table.selectCell(1, 1, false)
+    table.selectCell(10, 4, true)
+    table.refreshSelection()
+    table.publishSelection()
+  })
+  await expect(page.locator('.colwork-table__remote-selection').first()).toBeAttached()
+  const gaps = await page.evaluate(() => {
+    const original = window.requestAnimationFrame
+    window.requestAnimationFrame = () => 0
+    try {
+      table.viewport.scrollTop = 180
+      table.viewport.scrollLeft = 240
+      table.viewport.dispatchEvent(new Event('scroll'))
+      return [...document.querySelectorAll('.colwork-table__selection, .colwork-table__remote-selection')].flatMap(overlay => {
+        const a = overlay.getBoundingClientRect()
+        const b = overlay.parentElement.getBoundingClientRect()
+        return [a.left - b.left, a.top - b.top, a.right - b.right, a.bottom - b.bottom]
+      })
+    } finally { window.requestAnimationFrame = original; table.renderFrame = undefined }
+  })
+  for (const gap of gaps) expect(Math.abs(gap)).toBeLessThan(0.6)
+  // Scrolling cells and their highlights must remain beneath the frozen pane.
+  const hit = await cell(page, '1:1').evaluate(element => {
+    const box = element.getBoundingClientRect()
+    return document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2)?.closest('td')?.dataset.key
+  })
+  expect(hit).toBe('1:1')
+  await page.screenshot({ path: testInfo.outputPath('native-frozen-selections.png') })
+  for (const mode of ['row', 'column', 'all']) {
+    await page.evaluate(mode => {
+      table.viewport.scrollTop = 0
+      table.viewport.scrollLeft = 0
+      if (mode === 'all') table.selectRange({ row: 0, column: 0 }, { row: table.rowCount - 1, column: table.columnCount - 1 }, 'all')
+      else table.selectHeaderRange(mode, 1, false)
+    }, mode)
+    const partialCells = await page.locator('.colwork-table__selection').evaluateAll(overlays => overlays.filter(overlay => {
+      const a = overlay.getBoundingClientRect()
+      const b = overlay.parentElement.getBoundingClientRect()
+      return overlay.parentElement.colSpan === 1 && overlay.parentElement.rowSpan === 1
+        && (Math.abs(a.width - b.width) > 0.6 || Math.abs(a.height - b.height) > 0.6)
+    }).length)
+    expect(partialCells).toBe(0)
+    if (mode === 'column') {
+      await expect.poll(() => page.evaluate(() => {
+        // Read both rectangles in one task; queued virtual rendering must not
+        // replace the header between two browser round trips.
+        const header = document.querySelector('th[data-selection-axis="column"][data-selection-index="1"]')?.getBoundingClientRect()
+        const highlight = document.querySelector('td[data-key="0:0"] .colwork-table__selection')?.getBoundingClientRect()
+        return header && highlight ? Math.max(Math.abs(highlight.x - header.x), Math.abs(highlight.width - header.width)) : Infinity
+      })).toBeLessThan(0.6)
+    }
+  }
+  await page.evaluate(() => {
+    table.merges.set('6:4-8:4', '1')
+    table.selectHeaderRange('row', 7, false)
+  })
+  await expect.poll(() => page.evaluate(() => {
+    const header = document.querySelector('th[data-selection-axis="row"][data-selection-index="7"]')?.getBoundingClientRect()
+    const highlight = document.querySelector('td[data-key="6:4"] .colwork-table__selection')?.getBoundingClientRect()
+    return header && highlight ? Math.max(Math.abs(highlight.y - header.y), Math.abs(highlight.height - header.height)) : Infinity
+  })).toBeLessThan(0.6)
+  await context.close()
+})
 
 test('fixed rows/columns survive virtual scrolling, merges, zoom, and unfreeze', async ({ page }) => {
   await mount(page)
@@ -572,7 +731,9 @@ test('frozen and unfrozen headers remain resizable and cells remain editable', a
   const resize = async (axis, index, delta) => {
     const selector = `th[data-selection-axis="${axis}"][data-selection-index="${index}"] .colwork-table__resize-handle`
     await expect(page.locator(selector)).toBeVisible()
-    const handle = await page.locator(selector).boundingBox()
+    let handle
+    // A queued virtual render can replace a visible header between reads.
+    await expect.poll(async () => { handle = await page.locator(selector).boundingBox(); return handle !== null }).toBe(true)
     const x = handle.x + handle.width / 2
     const y = handle.y + handle.height / 2
     const before = await page.evaluate(({ axis, index }) => axis === 'row' ? table.getRowHeight(index) : table.getColumnWidth(index), { axis, index })

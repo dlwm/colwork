@@ -1,6 +1,6 @@
-.colwork-table { --colwork-freeze-color: #7394bf; --colwork-freeze-shadow: #33415524; border: 1px solid #dde3ea; border-radius: 12px; background: #fff; box-shadow: 0 12px 36px #3440540d; }
+.colwork-table { --colwork-freeze-color: #7394bf; --colwork-freeze-shadow: #33415524; display: grid; grid-template-columns: minmax(0, 1fr); border: 1px solid #dde3ea; border-radius: 12px; background: #fff; box-shadow: 0 12px 36px #3440540d; }
 .colwork-table, .colwork-table * { box-sizing: border-box; }
-.colwork-table__toolbar { display: flex; flex-direction: column; gap: 0; padding: 4px 12px; border-bottom: 1px solid #dde3ea; border-radius: 12px 12px 0 0; background: #fff; }
+.colwork-table__toolbar { grid-area: 1 / 1; display: flex; flex-direction: column; gap: 0; padding: 4px 12px; border-bottom: 1px solid #dde3ea; border-radius: 12px 12px 0 0; background: #fff; }
 .colwork-table__toolbar[hidden] { display: none; }
 .colwork-table__toolbar-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; padding: 6px 0; }
 .colwork-table__toolbar-row + .colwork-table__toolbar-row { border-top: 1px solid #edf0f3; }
@@ -33,7 +33,7 @@
 .colwork-table__format--italic { font-style: italic; }
 .colwork-table__format--underline { text-decoration: underline; }
 .colwork-table__color { width: 24px; height: 24px; margin-left: 4px; border: 1px solid #cbd5e1; border-radius: 4px; padding: 2px; background: transparent; cursor: pointer; }
-.colwork-table__viewport { position: relative; width: 100%; height: min(560px, 55vh); min-height: 240px; overflow-x: auto; overflow-y: auto; scrollbar-gutter: stable; }
+.colwork-table__viewport { grid-area: 2 / 1; position: relative; width: 100%; height: min(560px, 55vh); min-height: 240px; overflow-x: auto; overflow-y: auto; scrollbar-gutter: stable; }
 .colwork-table__viewport:focus { outline: 0; }
 .colwork-table table { width: max-content; min-width: 100%; min-width: calc(900px * var(--colwork-zoom, 1)); border-collapse: separate; border-spacing: 0; table-layout: fixed; }
 .colwork-table th, .colwork-table td { height: calc(56px * var(--colwork-zoom, 1)); border-top: 1px solid #edf0f3; border-right: 1px solid #edf0f3; padding: 0; text-align: left; }
@@ -48,7 +48,7 @@
 .colwork-table thead th:first-child, .colwork-table tbody th { width: calc(54px * var(--colwork-zoom, 1)); color: #a0aec0; text-align: center; font-size: calc(12px * var(--colwork-zoom, 1)); font-weight: 500; }
 .colwork-table table.is-grid-hidden th, .colwork-table table.is-grid-hidden td { border-color: transparent; }
 .colwork-table table.is-banded-rows tbody tr.is-banded-row td { background: #f8fafc; }
-.colwork-table td { position: relative; overflow: hidden; cursor: default; padding: 0 calc(14px * var(--colwork-zoom, 1)); color: #334155; vertical-align: top; font-size: calc(1rem * var(--colwork-zoom, 1)); white-space: pre; text-overflow: clip; }
+.colwork-table td { position: relative; z-index: 0; overflow: visible; cursor: default; padding: 0 calc(14px * var(--colwork-zoom, 1)); color: #334155; vertical-align: top; font-size: calc(1rem * var(--colwork-zoom, 1)); white-space: pre; text-overflow: clip; }
 .colwork-table__cell-value { display: block; overflow: hidden; transform-origin: left center; }
 .colwork-table__resize-handle { position: absolute; z-index: 6; display: block; opacity: 0; background: #4777b8; transition: opacity .12s ease; }
 .colwork-table__resize-handle:hover, .colwork-table__resize-handle:active { opacity: 1; }
@@ -93,6 +93,7 @@
 .colwork-table__context-menu button.is-destructive:hover { background: #fef2f2; }
 .colwork-table__border-control:focus-within .colwork-table__border-menu { display: flex; flex-direction: column; gap: 2px; }
 .colwork-table__frozen-boundary { position: absolute; z-index: 13; pointer-events: none; background: var(--colwork-freeze-color); }
+.colwork-table__frozen-boundaries { grid-area: 2 / 1; position: relative; align-self: start; justify-self: start; overflow: hidden; z-index: 13; pointer-events: none; }
 .colwork-table__frozen-boundary--row { height: 2px; box-shadow: 0 3px 5px var(--colwork-freeze-shadow); }
 .colwork-table__frozen-boundary--column { width: 2px; box-shadow: 3px 0 5px var(--colwork-freeze-shadow); }
 @media (max-width: 600px) {

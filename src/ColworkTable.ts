@@ -88,6 +88,7 @@ export class ColworkTable {
   private readonly table: HTMLTableElement
   private readonly viewportResizeObserver: ResizeObserver
   private readonly viewport: HTMLDivElement
+  private readonly frozenBoundaryLayer: HTMLDivElement
   private protectionMenuButton?: HTMLButtonElement
   private contextMenu?: HTMLDivElement
   private pendingCellContext?: { x: number; y: number }
@@ -499,7 +500,10 @@ export class ColworkTable {
     this.table = document.createElement('table')
     this.table.addEventListener('mousedown', this.onTableMouseDown)
     this.viewport.append(this.table)
-    shell.append(toolbar, this.viewport)
+    this.frozenBoundaryLayer = document.createElement('div')
+    this.frozenBoundaryLayer.className = 'colwork-table__frozen-boundaries'
+    this.frozenBoundaryLayer.setAttribute('aria-hidden', 'true')
+    shell.append(toolbar, this.viewport, this.frozenBoundaryLayer)
     root.replaceChildren(shell)
 
     const shouldSeed = !this.readOnly && !options.snapshot && !options.updates?.length
@@ -1645,17 +1649,21 @@ export class ColworkTable {
   }
 
   private refreshFrozenBoundaries() {
-    this.viewport.querySelectorAll('.colwork-table__frozen-boundary').forEach(line => line.remove())
+    // The layer shares the viewport's grid area but sits outside its scrolling
+    // contents. Browser scrolling never changes its position, even before JS runs.
+    this.frozenBoundaryLayer.replaceChildren()
+    this.frozenBoundaryLayer.style.width = `${this.viewport.clientWidth}px`
+    this.frozenBoundaryLayer.style.height = `${this.viewport.clientHeight}px`
     const add = (axis: 'row' | 'column', count: number, position: number, limit: number) => {
       if (!count || position >= limit) return
       const line = document.createElement('span')
       line.className = `colwork-table__frozen-boundary colwork-table__frozen-boundary--${axis}`
       line.setAttribute('aria-hidden', 'true')
-      line.style.left = `${this.viewport.scrollLeft + (axis === 'column' ? position - 1 : 0)}px`
-      line.style.top = `${this.viewport.scrollTop + (axis === 'row' ? position - 1 : 0)}px`
+      line.style.left = `${axis === 'column' ? position - 1 : 0}px`
+      line.style.top = `${axis === 'row' ? position - 1 : 0}px`
       if (axis === 'column') line.style.height = `${this.viewport.clientHeight}px`
       else line.style.width = `${this.viewport.clientWidth}px`
-      this.viewport.append(line)
+      this.frozenBoundaryLayer.append(line)
     }
     add('row', this.frozenRows, this.columnHeaderHeight + getViewportOffset(this.frozenRows, row => this.getRowHeight(row)), this.viewport.clientHeight)
     add('column', this.frozenColumns, this.rowHeaderWidth + getViewportOffset(this.frozenColumns, column => this.getColumnWidth(column)), this.viewport.clientWidth)
@@ -1685,7 +1693,7 @@ export class ColworkTable {
         : index >= bounds.left && index <= bounds.right))
       header.classList.toggle('is-selected-header', selected)
     })
-    this.addSelectionOverlay(selectionRange({ row: bounds.top, column: bounds.left }, { row: bounds.bottom, column: bounds.right }), 'colwork-table__selection', this.options.userColor ?? '#3b82f6', this.selectionMode)
+    this.addSelectionOverlay(selectionRange({ row: bounds.top, column: bounds.left }, { row: bounds.bottom, column: bounds.right }), 'colwork-table__selection', this.options.userColor ?? '#3b82f6')
   }
 
   private refreshCursors() {
@@ -1699,7 +1707,7 @@ export class ColworkTable {
       const selectionState = state.selection as AwarenessSelection | undefined
       if (selectionState?.anchor && selectionState.focus) {
         const remoteRange = remoteSelectionRange(selectionState, this.rowCount, this.columnCount)
-        if (remoteRange) this.addSelectionOverlay(remoteRange, 'colwork-table__remote-selection', state.user?.color ?? '#94a3b8', selectionState.mode)
+        if (remoteRange) this.addSelectionOverlay(remoteRange, 'colwork-table__remote-selection', state.user?.color ?? '#94a3b8')
         const top = Math.min(selectionState.anchor.row, selectionState.focus.row)
         const left = Math.min(selectionState.anchor.column, selectionState.focus.column)
         const labelCell = this.table.querySelector<HTMLTableCellElement>(`td[data-key="${top}:${left}"]`)
@@ -1712,109 +1720,55 @@ export class ColworkTable {
     })
   }
 
-  private addSelectionOverlay(range: ReturnType<typeof selectionRange>, className: string, color: string, mode?: SelectionMode) {
-    if (this.frozenRows || this.frozenColumns) {
-      this.addFrozenSelectionOverlay(range, className, color)
-      return
-    }
-    const startRow = Math.max(0, Math.min(this.rowCount - 1, range.start.row))
-    const startColumn = Math.max(0, Math.min(this.columnCount - 1, range.start.column))
-    const endRow = Math.max(0, Math.min(this.rowCount - 1, range.end.row))
-    const endColumn = Math.max(0, Math.min(this.columnCount - 1, range.end.column))
-    if (startRow > endRow || startColumn > endColumn) return
-    const columnSize = (column: number) => this.getColumnWidth(column)
-    const rowSize = (row: number) => this.getRowHeight(row)
-    const viewportRect = this.viewport.getBoundingClientRect()
-    const tableRect = this.table.getBoundingClientRect()
-    const firstCell = this.table.querySelector<HTMLTableCellElement>('td[data-key]')
-    const firstKey = firstCell?.dataset.key?.split(':').map(Number)
-    const firstRect = firstCell?.getBoundingClientRect()
-    const logicalLeft = (column: number) => this.rowHeaderWidth + getViewportOffset(column, columnSize)
-    const logicalTop = (row: number) => this.columnHeaderHeight + getViewportOffset(row, rowSize)
-    const firstRowSpanHeight = firstCell && firstKey
-      ? getViewportOffset(firstKey[0] + firstCell.rowSpan, rowSize) - getViewportOffset(firstKey[0], rowSize)
-      : 0
-    const rowScale = firstRect && firstRowSpanHeight ? firstRect.height / firstRowSpanHeight : 1
-    const actualLeft = (column: number) => {
-      const cell = this.table.querySelector<HTMLTableCellElement>(`td[data-key="${startRow}:${column}"]`)
-      if (cell) return cell.getBoundingClientRect().left - viewportRect.left + this.viewport.scrollLeft
-      if (!firstRect || !firstKey) return logicalLeft(column)
-      return firstRect.left - viewportRect.left + this.viewport.scrollLeft + getViewportOffset(column, columnSize) - getViewportOffset(firstKey[1], columnSize)
-    }
-    const actualRight = (column: number) => {
-      const cell = this.table.querySelector<HTMLTableCellElement>(`td[data-key="${endRow}:${column}"]`)
-      if (cell) return cell.getBoundingClientRect().right - viewportRect.left + this.viewport.scrollLeft
-      if (!firstRect || !firstKey) return logicalLeft(column + 1)
-      return firstRect.left - viewportRect.left + this.viewport.scrollLeft + getViewportOffset(column + 1, columnSize) - getViewportOffset(firstKey[1], columnSize)
-    }
-    const actualTop = (row: number) => {
-      const cell = this.table.querySelector<HTMLTableCellElement>(`td[data-key="${row}:${startColumn}"]`)
-      if (cell) return cell.getBoundingClientRect().top - viewportRect.top + this.viewport.scrollTop
-      if (!firstRect || !firstKey) return logicalTop(row)
-      return firstRect.top - viewportRect.top + this.viewport.scrollTop + (getViewportOffset(row, rowSize) - getViewportOffset(firstKey[0], rowSize)) * rowScale
-    }
-    const actualBottom = (row: number) => {
-      const cell = this.table.querySelector<HTMLTableCellElement>(`td[data-key="${row}:${endColumn}"]`)
-      if (cell) return cell.getBoundingClientRect().bottom - viewportRect.top + this.viewport.scrollTop
-      if (!firstRect || !firstKey) return logicalTop(row + 1)
-      return firstRect.top - viewportRect.top + this.viewport.scrollTop + (getViewportOffset(row + 1, rowSize) - getViewportOffset(firstKey[0], rowSize)) * rowScale
-    }
-    const renderedRowCells = mode === 'row'
-      ? Array.from(this.table.querySelectorAll<HTMLTableCellElement>('td[data-key]')).filter((cell) => cell.dataset.key?.startsWith(`${startRow}:`))
-      : []
-    const rowHeader = renderedRowCells[0]?.parentElement?.querySelector('th')
-    const rowHeaderRect = rowHeader?.getBoundingClientRect()
-    const left = mode === 'row' ? this.rowHeaderWidth : actualLeft(startColumn)
-    const top = rowHeaderRect ? rowHeaderRect.top - viewportRect.top + this.viewport.scrollTop : actualTop(startRow)
-    const right = mode === 'row' || mode === 'all'
-      ? tableRect.right - viewportRect.left + this.viewport.scrollLeft
-      : actualRight(endColumn)
-    const bottom = rowHeaderRect && startRow === endRow
-      ? rowHeaderRect.bottom - viewportRect.top + this.viewport.scrollTop
-      : actualBottom(endRow)
-    const overlay = document.createElement('span')
-    overlay.className = className
-    overlay.style.left = `${left}px`
-    overlay.style.top = `${top}px`
-    overlay.style.width = `${right - left}px`
-    overlay.style.height = `${bottom - top}px`
-    overlay.style.borderColor = color
-    overlay.style.backgroundColor = colorWithAlpha(color, 0.1)
-    this.viewport.append(overlay)
-  }
-
-  private addFrozenSelectionOverlay(range: CellRange, className: string, color: string) {
-    const split = (start: number, end: number, frozen: number) => [
-      { start, end: Math.min(end, frozen - 1), fixed: true },
-      { start: Math.max(start, frozen), end, fixed: false },
-    ].filter((part) => part.start <= part.end)
-    const rowSize = (row: number) => this.getRowHeight(row)
-    const columnSize = (column: number) => this.getColumnWidth(column)
-    const frozenHeight = getViewportOffset(this.frozenRows, rowSize)
-    const frozenWidth = getViewportOffset(this.frozenColumns, columnSize)
-    for (const row of split(range.start.row, range.end.row, this.frozenRows)) {
-      for (const column of split(range.start.column, range.end.column, this.frozenColumns)) {
-        const x = this.viewport.scrollLeft
-        const y = this.viewport.scrollTop
-        const left = this.rowHeaderWidth + getViewportOffset(column.start, columnSize) + (column.fixed ? x : 0)
-        const top = this.columnHeaderHeight + getViewportOffset(row.start, rowSize) + (row.fixed ? y : 0)
-        const right = this.rowHeaderWidth + getViewportOffset(column.end + 1, columnSize) + (column.fixed ? x : 0)
-        const bottom = this.columnHeaderHeight + getViewportOffset(row.end + 1, rowSize) + (row.fixed ? y : 0)
-        const clippedLeft = Math.max(left, x + this.rowHeaderWidth + (column.fixed ? 0 : frozenWidth))
-        const clippedTop = Math.max(top, y + this.columnHeaderHeight + (row.fixed ? 0 : frozenHeight))
-        const clippedRight = Math.min(right, x + this.viewport.clientWidth)
-        const clippedBottom = Math.min(bottom, y + this.viewport.clientHeight)
-        if (clippedRight <= clippedLeft || clippedBottom <= clippedTop) continue
-        const overlay = document.createElement('span')
-        overlay.className = className
-        Object.assign(overlay.style, {
-          left: `${clippedLeft}px`, top: `${clippedTop}px`,
-          width: `${clippedRight - clippedLeft}px`, height: `${clippedBottom - clippedTop}px`,
-          zIndex: '6', borderColor: color, backgroundColor: colorWithAlpha(color, 0.1),
-        })
-        this.viewport.append(overlay)
+  private addSelectionOverlay(range: CellRange, className: string, color: string) {
+    // Attach highlights to the actual rendered cells. Their containing blocks
+    // provide exact merged/resized geometry and native sticky scrolling without
+    // waiting for the virtual window's next animation frame.
+    this.table.querySelectorAll<HTMLTableCellElement>('td[data-key]').forEach(cell => {
+      const [row, column] = cell.dataset.key!.split(':').map(Number)
+      const bottom = row + cell.rowSpan - 1
+      const right = column + cell.colSpan - 1
+      if (row > range.end.row || bottom < range.start.row || column > range.end.column || right < range.start.column) return
+      const border = getComputedStyle(cell)
+      const topBorder = parseFloat(border.borderTopWidth)
+      const rightBorder = parseFloat(border.borderRightWidth)
+      const bottomBorder = parseFloat(border.borderBottomWidth)
+      const leftBorder = parseFloat(border.borderLeftWidth)
+      const inset = (start: number, end: number, selectedStart: number, selectedEnd: number, axis: 'row' | 'column', leadingBorder: number, trailingBorder: number) => {
+        // Header selection may intentionally include only part of a merge.
+        // Use rendered header sizes to locate that part within the merged cell.
+        if (start >= selectedStart && end <= selectedEnd) return [`${-leadingBorder}px`, `${-trailingBorder}px`]
+        let total = 0, leading = 0, trailing = 0
+        for (let index = start; index <= end; index++) {
+          const header = this.table.querySelector<HTMLElement>(`th[data-selection-axis="${axis}"][data-selection-index="${index}"]`)
+          const box = header?.getBoundingClientRect()
+          const size = axis === 'row' ? box?.height ?? this.getRowHeight(index) : box?.width ?? this.getColumnWidth(index)
+          total += size
+          if (index < selectedStart) leading += size
+          if (index > selectedEnd) trailing += size
+        }
+        const offset = (size: number, edge: number) => size === 0 ? `${-edge}px`
+          : `calc(${size / total * 100}% + ${(leadingBorder + trailingBorder) * size / total - edge}px)`
+        return [offset(leading, leadingBorder), offset(trailing, trailingBorder)]
       }
-    }
+      const [top, bottomInset] = inset(row, bottom, range.start.row, range.end.row, 'row', topBorder, bottomBorder)
+      const [left, rightInset] = inset(column, right, range.start.column, range.end.column, 'column', leftBorder, rightBorder)
+      const overlay = document.createElement('span')
+      overlay.className = className
+      overlay.setAttribute('aria-hidden', 'true')
+      // Absolute children are positioned against the padding box. Include each
+      // cell's real borders so the outside edge coincides with its border box.
+      Object.assign(overlay.style, {
+        top, right: rightInset, bottom: bottomInset, left,
+        borderTopWidth: row <= range.start.row ? '2px' : '0',
+        borderRightWidth: right >= range.end.column ? '2px' : '0',
+        borderBottomWidth: bottom >= range.end.row ? '2px' : '0',
+        borderLeftWidth: column <= range.start.column ? '2px' : '0',
+        borderColor: color,
+        backgroundColor: colorWithAlpha(color, 0.1),
+      })
+      cell.append(overlay)
+    })
   }
 
   private addCursorLabel(cell: HTMLTableCellElement, state: any, clientId: number) {
@@ -1994,6 +1948,8 @@ export class ColworkTable {
         }
       }
     })
+    this.refreshSelection()
+    this.refreshCursors()
   }
 
   private finishEdit(commit: boolean) {
