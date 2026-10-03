@@ -4,6 +4,7 @@ body { min-width: 320px; min-height: 100vh; margin: 0; overflow: hidden; }
 .vue-page { background: #42b883; }
 .react-page { background: #61dafb; }
 .example-back { position: fixed; top: 14px; left: 18px; z-index: 50; display: inline-flex; align-items: center; gap: 7px; border: 1px solid #ffffff80; border-radius: 7px; padding: 8px 10px; color: #25463e; background: #ffffffd9; text-decoration: none; font: 12px system-ui, sans-serif; }
+.example-logo { display: block; flex: none; object-fit: contain; }
 .example-back:hover { background: #fff; }
 .example-back:focus-visible { outline: 2px solid #315984; outline-offset: 3px; }
 .vue-page .test-shell, .react-page .test-shell { padding-top: max(64px, 4vh); }
@@ -69,8 +70,10 @@ body { min-width: 320px; min-height: 100vh; margin: 0; overflow: hidden; }
 .log-room .log-kind { background: #64748b; }
 .viewer-page { min-width: 320px; min-height: 100vh; overflow: auto; color: #26313d; background: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
 .viewer-shell { width: min(1180px, 100%); margin: 0 auto; padding: 24px 28px 36px; }
-.viewer-nav { display: flex; flex-wrap: wrap; gap: 18px; border-bottom: 1px solid #e1e5ea; padding-bottom: 16px; font-size: 13px; }
+.viewer-nav { display: flex; align-items: center; flex-wrap: wrap; gap: 18px; border-bottom: 1px solid #e1e5ea; padding-bottom: 16px; font-size: 13px; }
 .viewer-nav a { color: #546170; text-decoration: none; }
+.viewer-home { display: inline-flex; align-items: center; gap: 6px; }
+.viewer-home img { display: block; flex: none; }
 .viewer-nav a:hover { color: #253f60; text-decoration: underline; }
 .viewer-nav a:focus-visible, .viewer-action:focus-visible { outline: 2px solid #6683a5; outline-offset: 3px; }
 .viewer-header { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin: 24px 0 8px; }

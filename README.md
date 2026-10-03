@@ -1,3 +1,5 @@
+<img src="docs/brand/colwork-logo.png" width="112" height="112" alt="Colwork logo" />
+
 # Colwork
 
 基于 Yjs 的多人协作表格前端库，使用原生 DOM 渲染，提供 Vue / React 演示页。
