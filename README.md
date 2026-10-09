@@ -11,12 +11,12 @@
 ## 安装与使用
 
 ```sh
-npm install colwork
+npm install @kuzuma/colwork
 ```
 
 ```ts
-import { ColworkTable } from 'colwork'
-import 'colwork/colwork.css'
+import { ColworkTable } from '@kuzuma/colwork'
+import '@kuzuma/colwork/colwork.css'
 
 const table = new ColworkTable(document.querySelector<HTMLElement>('#table')!, {
   room: 'my-room',
