@@ -18,7 +18,7 @@
       </header>
       <section class="home-setup" aria-labelledby="setup-title">
         <h2 id="setup-title">从一个简单示例开始</h2>
-        <p>在仓库中运行 <code>npm run build:lib</code>，将 <code>dist/colwork.js</code> 和 <code>dist/colwork.css</code> 放入应用的 <code>src/vendor/colwork/</code>，即可按下面的方式引入。</p>
+        <p>运行 <code>npm install colwork</code>，即可按下面的方式引入。</p>
         <p>本地协作服务使用 <code>ws://127.0.0.1:1234</code>；部署后将连接地址改为自己的 <code>wss://域名/rooms</code>。持久化后端可添加 <code>initializeAfterSync: true</code>，先同步保存的数据再初始化表格。</p>
       </section>
       <section class="home-examples" aria-label="框架引入示例">
@@ -27,8 +27,8 @@
           <a class="example-link" href="/test/vue.html">打开 Vue 示例 <span aria-hidden="true">→</span></a>
           <div class="example-code"><div class="code-heading"><span>引入与基础配置</span><span>App.vue</span></div><pre><code>&lt;script setup&gt;
 import { ref, onMounted, onBeforeUnmount } from &#x27;vue&#x27;
-import { ColworkTable } from &#x27;./vendor/colwork/colwork.js&#x27;
-import &#x27;./vendor/colwork/colwork.css&#x27;
+import { ColworkTable } from &#x27;colwork&#x27;
+import &#x27;colwork/colwork.css&#x27;
 
 const root = ref(null)
 let table
@@ -56,8 +56,8 @@ onBeforeUnmount(() =&gt; table?.destroy())
           <div class="example-heading"><span class="framework-mark" aria-hidden="true">R</span><div><h2>React</h2><p>使用 Hooks 创建实例并在卸载时清理。</p></div></div>
           <a class="example-link" href="/test/react.html">打开 React 示例 <span aria-hidden="true">→</span></a>
           <div class="example-code"><div class="code-heading"><span>引入与基础配置</span><span>App.jsx</span></div><pre><code>import { useEffect, useRef } from &#x27;react&#x27;
-import { ColworkTable } from &#x27;./vendor/colwork/colwork.js&#x27;
-import &#x27;./vendor/colwork/colwork.css&#x27;
+import { ColworkTable } from &#x27;colwork&#x27;
+import &#x27;colwork/colwork.css&#x27;
 
 export default function App() {
   const root = useRef(null)

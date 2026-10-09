@@ -8,6 +8,31 @@
 
 ![demo.png](docs/demo.png)
 
+## 安装与使用
+
+```sh
+npm install colwork
+```
+
+```ts
+import { ColworkTable } from 'colwork'
+import 'colwork/colwork.css'
+
+const table = new ColworkTable(document.querySelector<HTMLElement>('#table')!, {
+  room: 'my-room',
+  user: '协作者',
+  transport: 'websocket',
+  websocketUrl: 'wss://your-domain/rooms',
+  rowCount: 100,
+  columnCount: 10,
+})
+
+// Vue / React 组件卸载时清理实例。
+// table.destroy()
+```
+
+在浏览器中创建实例，并准备好表格容器和自己的 Yjs WebSocket 服务；npm 包不包含服务端。包提供 ES / UMD 构建及 TypeScript 类型声明，Vue / React 示例见下方开发入口。通过浏览器直接使用 UMD 构建时，需要先提供 `Y`、`YAwareness`、`YWebrtc` 和 `YWebsocket` 全局依赖。
+
 ## 开发
 
 ```sh

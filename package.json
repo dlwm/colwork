@@ -1,8 +1,7 @@
 {
   "name": "colwork",
-  "version": "0.1.8",
+  "version": "0.1.0",
   "license": "MIT",
-  "private": true,
   "type": "module",
   "scripts": {
     "dev": "npm run dev:test",
@@ -17,16 +16,10 @@
     "dev:cloudflare": "npm run build:site && wrangler dev --config config/cloudflare/wrangler.dev.json --persist-to .wrangler/state",
     "deploy:check": "node script/deploy-cloudflare.mjs --dry-run",
     "deploy": "node script/deploy-cloudflare.mjs",
-    "test:cloudflare": "node --test test/cloudflare/*.test.mjs"
+    "test:cloudflare": "node --test test/cloudflare/*.test.mjs",
+    "prepublishOnly": "npm run build:lib"
   },
   "dependencies": {
-    "@vitejs/plugin-react": "^4.4.1",
-    "@vitejs/plugin-vue": "^5.2.3",
-    "lib0": "^0.2.119",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "vue": "^3.5.13",
-    "ws": "^8.21.3",
     "y-protocols": "^1.0.7",
     "y-webrtc": "^10.3.0",
     "y-websocket": "^2.1.0",
@@ -36,8 +29,53 @@
     "@playwright/test": "^1.63.0",
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "@vitejs/plugin-vue": "^5.2.3",
+    "lib0": "^0.2.119",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
     "typescript": "^5.8.3",
     "vite": "^6.3.5",
-    "wrangler": "^4.145.0"
+    "vite-plugin-dts": "^4.5.4",
+    "vue": "^3.5.13",
+    "wrangler": "^4.145.0",
+    "ws": "^8.21.3"
+  },
+  "description": "A collaborative spreadsheet library powered by Yjs, with native DOM rendering, frozen panes, and password-protected ranges.",
+  "main": "./dist/colwork.umd.cjs",
+  "module": "./dist/colwork.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/colwork.js",
+      "require": "./dist/colwork.umd.cjs"
+    },
+    "./colwork.css": "./dist/colwork.css"
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": [
+    "**/*.css"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dlwm/colwork.git"
+  },
+  "homepage": "https://github.com/dlwm/colwork#readme",
+  "bugs": {
+    "url": "https://github.com/dlwm/colwork/issues"
+  },
+  "keywords": [
+    "spreadsheet",
+    "collaboration",
+    "yjs",
+    "vue",
+    "react"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }
