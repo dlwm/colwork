@@ -47,6 +47,33 @@ npm run dev
 
 `npm run build` 执行 TypeScript 检查并构建 ES / UMD 库。
 
+### 切换示例使用的库
+
+Vue、React 和快照工具默认使用本地 `src/`，也可以测试 npm 发布版本，开关同时切换 JavaScript 和 CSS：
+
+```sh
+npm run dev -- --source=local
+npm run dev -- --source=npm
+```
+
+npm 模式自动从官方 registry 安装 `@kuzuma/colwork@0.1.0` 到被 Git 忽略的 `.wrangler/npm-demo/`，不会修改项目依赖或锁文件；本地模式保留源码热更新。若要测试其他已发布版本，设置 `COLWORK_NPM_VERSION`：
+
+```sh
+COLWORK_NPM_VERSION=latest npm run dev -- --source=npm
+npm run build:site -- --source=npm
+```
+
+根目录也提供 Makefile，先运行 `npm ci` 安装项目依赖：
+
+```sh
+make dev                           # 默认本地源码
+make dev SOURCE=npm                # npm 发布版本
+make dev SOURCE=npm NPM_VERSION=latest
+make build-site SOURCE=npm         # 用 npm 版本构建网站
+```
+
+`COLWORK_SOURCE=local|npm` 也可设置默认来源，显式 `--source` 参数优先。切换来源后需要重启开发服务；Cloudflare 部署默认继续使用本地源码。
+
 ## Cloudflare 部署
 
 使用两个独立 Worker，部署目标为：

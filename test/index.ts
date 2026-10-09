@@ -1,8 +1,12 @@
-import { ColworkTable, rebuildYjsSnapshot } from '../src'
-import { base64ToBytes } from '../src/yjsArchive'
+import { ColworkTable, rebuildYjsSnapshot } from '@colwork-demo'
+import '@colwork-demo/style'
 import './test.css'
 
 type InputData = { format?: string; snapshot?: { snapshot?: string } | string; updates?: Array<{ update?: string }> }
+
+function base64ToBytes(value: string) {
+  return Uint8Array.from(atob(value), (character) => character.charCodeAt(0))
+}
 
 const snapshotInput = document.querySelector<HTMLTextAreaElement>('#snapshot-input')!
 const updatesInput = document.querySelector<HTMLTextAreaElement>('#updates-input')!

@@ -4,6 +4,9 @@
     "useDefineForClassFields": true,
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "paths": {
+      "@colwork-demo": ["./src/index.ts"]
+    },
     "jsx": "react-jsx",
     "strict": true,
     "skipLibCheck": true,

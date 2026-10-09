@@ -1,5 +1,6 @@
 import { createApp, defineComponent, h, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ColworkTable } from '../../src'
+import { ColworkTable } from '@colwork-demo'
+import '@colwork-demo/style'
 import { classifyLog, formatLog, loadLogTypes, logTypes, saveLogTypes, type LogEntry, type LogType } from '../log'
 import { splitHexGroups, splitLogText } from '../identifiers'
 import { downloadJson } from '../archive'
