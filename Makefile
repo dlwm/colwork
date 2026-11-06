@@ -1,5 +1,5 @@
 SOURCE ?= local
-NPM_VERSION ?= 0.1.0
+NPM_VERSION ?= 0.2.0
 
 .PHONY: dev build-site
 dev:

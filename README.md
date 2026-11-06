@@ -167,7 +167,7 @@ npm run dev -- --source=local
 npm run dev -- --source=npm
 ```
 
-npm 模式自动从官方 registry 安装 `@kuzuma/colwork@0.1.0` 到被 Git 忽略的 `.wrangler/npm-demo/`，不会修改项目依赖或锁文件；本地模式保留源码热更新。若要测试其他已发布版本，设置 `COLWORK_NPM_VERSION`：
+npm 模式自动从官方 registry 安装 `@kuzuma/colwork@0.2.0` 到被 Git 忽略的 `.wrangler/npm-demo/`，不会修改项目依赖或锁文件；本地模式保留源码热更新。若要测试其他已发布版本，设置 `COLWORK_NPM_VERSION`：
 
 ```sh
 COLWORK_NPM_VERSION=latest npm run dev -- --source=npm
