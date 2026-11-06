@@ -33,6 +33,117 @@ const table = new ColworkTable(document.querySelector<HTMLElement>('#table')!, {
 
 在浏览器中创建实例，并准备好表格容器和自己的 Yjs WebSocket 服务；npm 包不包含服务端。包提供 ES / UMD 构建及 TypeScript 类型声明，Vue / React 示例见下方开发入口。通过浏览器直接使用 UMD 构建时，需要先提供 `Y`、`YAwareness`、`YWebrtc` 和 `YWebsocket` 全局依赖。
 
+## 宿主管理协作连接
+
+0.2.0 的 `external` 模式接受宿主创建的 Y.Doc 与 Awareness，适用于自选 Provider 的应用。Provider 的连接、重连、认证、保存和最终销毁由宿主负责。
+
+```ts
+import * as Y from 'yjs'
+import { Awareness } from 'y-protocols/awareness'
+import { ColworkTable } from '@kuzuma/colwork'
+import { initializeBlankSheet } from '@kuzuma/colwork/model'
+import '@kuzuma/colwork/colwork.css'
+
+const document = new Y.Doc()
+const awareness = new Awareness(document)
+initializeBlankSheet(document) // 仅在创建新的空白表格时调用。
+// 在宿主中将自己的 Provider 连接到同一个 document 和 awareness。
+
+const table = new ColworkTable(container, {
+  transport: 'external',
+  collaboration: { document, awareness },
+  user: '协作者',
+  rowCount: 100,
+  columnCount: 10,
+  readOnly: false,
+  onEditingChange({ editing, dirty }) {
+    // dirty 表示当前单元格有尚未提交到 Yjs 的输入。
+    updateDraftIndicator({ editing, dirty })
+  },
+})
+
+table.commitEditing() // 宿主保存、发布或导出前可明确提交输入。
+const snapshot = table.getYjsSnapshot()
+table.cancelEditing() // 丢弃输入，继续显示共享文档的当前值。
+table.setReadOnly(true)
+table.destroy()
+// 所有使用者卸载后，由宿主清理 Provider、awareness 和 document。
+```
+
+`external` 模式的 `room` 可省略，仅作为可选存档标识。`Awareness` 必须属于传入的同一个 `Y.Doc`。此模式从传入文档读取内容，保留空表，不建立网络连接，也不插入示例内容。`rows`、`snapshot`、`updates` 和 `initializeAfterSync: true` 会被拒绝，文档初始化或载入应由宿主在创建表格前完成。内建 WebSocket、WebRTC 和离线快照模式继续支持原有选项与示例初始化。
+
+`readOnly: true` 与 `setReadOnly(true)` 禁止本机修改，继续订阅文档更新并显示协作者选区。切为只读会取消当前输入、尺寸拖动和待处理的密码操作。实际权限由宿主及服务端实施。
+
+`getYjsSnapshot()` 和 `getYjsUpdateLog()` 保持纯读取。`onEditingChange` 在开始输入、输入变化和结束编辑时同步通知。显式提交先更新 Yjs，再通知 `{ editing: false, dirty: false }`。外部模式 `destroy()` 丢弃尚未提交的输入，清理本组件的监听和撤销历史，保留宿主文档与 Awareness。重复销毁安全。原内建模式卸载时继续提交输入并销毁自有连接与文档。
+
+### Awareness 字段约定
+
+表格读取 `user.name`、`user.color`、`selection` 和 `cursor`，发布本机 `selection`、`cursor` 与 `editing`。已有 `user` 字段会保留，仅在缺少字段时补入 `user` 选项中的显示身份。宿主已将本机状态设为 `null` 时，组件保留该状态。
+
+```ts
+type Presence = {
+  user?: { name?: string; color?: string }
+  selection?: {
+    anchor?: { row: number; column: number }
+    focus?: { row: number; column: number }
+    mode?: 'row' | 'column' | 'all'
+  }
+  cursor?: { row: number; column: number; offset?: number }
+  editing?: string | null // 编辑中的 row:column，或 null。
+}
+```
+
+多个组件可共享同一个 Awareness，最后交互的组件负责当前本机选区。销毁时仅清除仍属于本实例的选区、光标与编辑字段，保留宿主后续写入的字段和其他本机状态。
+
+## 文档模型与 Node 入口
+
+`@kuzuma/colwork/model` 提供 ES / CommonJS 与独立类型声明，可在 Node 中导入，运行时仅依赖 Yjs。此入口用于校验、数据读取、空表初始化和存档导出。
+
+```ts
+import {
+  COLWORK_SCHEMA_VERSION,
+  COLWORK_MAP_NAMES,
+  getSheetMaps,
+  initializeBlankSheet,
+  validateSheetDocument,
+  readSheetSnapshot,
+  readSheetSnapshotUpdate,
+  exportYjsSnapshot,
+} from '@kuzuma/colwork/model'
+
+const issues = validateSheetDocument(document, {
+  maxRows: 10000,
+  maxColumns: 1000,
+  maxEntries: 50000,
+  maxStringLength: 8192,
+  maxMergeArea: 10000,
+  maxMerges: 1000,
+}) // 以上为宿主自行选择的示例策略。
+if (issues.length) throw new Error(issues[0].message)
+const sheet = readSheetSnapshot(document)
+const archive = exportYjsSnapshot(document, { room: 'optional-label', sequence: 0 })
+```
+
+公开线格式版本为 `COLWORK_SCHEMA_VERSION = 1`，兼容 0.1.0 的存档。所有根类型均为 `Y.Map`。`COLWORK_MAP_NAMES` 提供下列根名。
+
+| 根名 | Key | Value |
+| --- | --- | --- |
+| `cells` | `row:column` | 原始文本字符串 |
+| `styles` | `row:column` | JSON 编码的 `CellStyle` |
+| `rowHeights` | 行索引字符串 | 有限正数，逻辑像素 |
+| `columnWidths` | 列索引字符串 | 有限正数，逻辑像素 |
+| `merges` | `startRow:startColumn-endRow:endColumn` | 字符串 `"1"`，闭区间 |
+| `locks` | `row:column` | `"1"`，或 JSON 编码的 `PasswordLock` |
+| `colwork-metadata` | `initialized`、`schemaVersion` | 可选 boolean 与版本整数 |
+
+坐标从零开始，使用规范十进制非负安全整数。`CellStyle` 支持 `bold`、`italic`、`underline`、`strike`、`wrap` 布尔字段，`fontSize` 正数，`color`、`background` 字符串，`align` 为 `left / center / right`，`format` 为 `general / number / date / percent`，以及 `border.top / right / bottom / left` 布尔字段。`PasswordLock` 为版本 1 的 PBKDF2-SHA-256 记录，包含 `iterations: 600000`、32 位小写十六进制 `salt` 和 64 位小写十六进制 `verifier`。
+
+`validateSheetDocument()` 返回 `{ path, message }[]`。校验覆盖根类型、隐藏序列、嵌套值、样式与密码记录结构、坐标、尺寸和重叠合并，并要求文档已解析全部因果依赖。未知根默认拒绝，宿主需要扩展根时可传 `allowUnknownRoots: true`。未知样式与元数据字段、孤立 UTF-16 代理码位仍会拒绝。可选限制默认不设置应用特定数值上限，`maxEntries` 统计全部已知根的可见条目，包括元数据，`maxStringLength` 统计存储字符串的 UTF-16 长度。`maxMergeArea` 限定单块合并的逻辑单元格数，`maxMerges` 限定合并块数。二进制请求大小和实际授权由宿主控制。
+
+`readSheetSnapshot()` 校验后返回稀疏、可 JSON 序列化的 `SheetSnapshot`。字段依次为 `schemaVersion`、`rowCount`、`columnCount`、`cells`、`styles`、`rowHeights`、`columnWidths`、`merges` 和 `locks`。记录按数字坐标排序，样式、边框与密码记录使用固定字段顺序，合并按起点和终点排序。返回值不包含存档标识、更新序号或在线状态，适合宿主计算内容摘要。尺寸从持久条目推导，最小为 1，空白视图容量与固定窗格属于本地状态。渲染时合并块裁剪为可见片段，值、样式和编辑仍映射到原始左上角单元格，巨型合并不会扩张整块 DOM。显示尺寸沿用交互界面的最小行高与列宽，较小的持久尺寸会在本地显示时夹取，原始文档数值保留。
+
+`readSheetSnapshotUpdate(bytes, limits?)` 从完整 Yjs 状态更新读取相同结构，内部释放临时文档。尚有未解析插入或删除依赖的增量会被拒绝。`initializeBlankSheet()` 只接受空白表格，设置 `schemaVersion` 和 `initialized` 标记，可重复调用。`exportYjsSnapshot()` 返回原有 `colwork.snapshot` 格式，包含 Base64 状态与状态向量。导出保留 Yjs 原始状态，宿主可在调用前按自己的限制校验。
+
 ## 开发
 
 ```sh
@@ -205,6 +316,8 @@ await table.setSelectionLocked(false)               // 解锁无密码区域
 ```sh
 npx playwright install chromium
 npm run test:e2e
+npm run build:lib
+npm run test:model
 ```
 
 测试自动启动独立的 Vite 和临时 WebSocket 服务，覆盖固定、锁定、跨客户端同步和存档恢复。也可通过 `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH` 指定本机 Chrome 可执行文件。

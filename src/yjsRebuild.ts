@@ -24,28 +24,30 @@ export function rebuildYjsSnapshot(snapshotText?: string, updateLogText?: string
   const snapshot = getSnapshot(snapshotInput)
   const updates = [...getUpdates(snapshotInput), ...getUpdates(updateInput)]
   const doc = new Y.Doc()
-  if (snapshot?.snapshot) Y.applyUpdate(doc, base64ToBytes(snapshot.snapshot))
+  try {
+    if (snapshot?.snapshot) Y.applyUpdate(doc, base64ToBytes(snapshot.snapshot))
 
-  const snapshotSequence = Number(snapshot?.sequence ?? 0)
-  const seenSequences = new Set<number>()
-  const seenUpdates = new Set<string>()
-  let sequence = snapshotSequence
-  for (const record of updates.sort((left, right) => Number(left.seq) - Number(right.seq))) {
-    const current = Number(record.seq)
-    if (!Number.isInteger(current) || typeof record.update !== 'string') continue
-    if (current <= snapshotSequence || seenSequences.has(current) || seenUpdates.has(record.update)) continue
-    Y.applyUpdate(doc, base64ToBytes(record.update))
-    seenSequences.add(current)
-    seenUpdates.add(record.update)
-    sequence = Math.max(sequence, current)
-  }
+    const snapshotSequence = Number(snapshot?.sequence ?? 0)
+    const seenSequences = new Set<number>()
+    const seenUpdates = new Set<string>()
+    let sequence = snapshotSequence
+    for (const record of updates.sort((left, right) => Number(left.seq) - Number(right.seq))) {
+      const current = Number(record.seq)
+      if (!Number.isInteger(current) || typeof record.update !== 'string') continue
+      if (current <= snapshotSequence || seenSequences.has(current) || seenUpdates.has(record.update)) continue
+      Y.applyUpdate(doc, base64ToBytes(record.update))
+      seenSequences.add(current)
+      seenUpdates.add(record.update)
+      sequence = Math.max(sequence, current)
+    }
 
-  return {
-    format: 'colwork.snapshot',
-    version: 1,
-    room: snapshot?.room,
-    sequence,
-    snapshot: bytesToBase64(Y.encodeStateAsUpdate(doc)),
-    stateVector: bytesToBase64(Y.encodeStateVector(doc)),
-  }
+    return {
+      format: 'colwork.snapshot',
+      version: 1,
+      room: snapshot?.room,
+      sequence,
+      snapshot: bytesToBase64(Y.encodeStateAsUpdate(doc)),
+      stateVector: bytesToBase64(Y.encodeStateVector(doc)),
+    }
+  } finally { doc.destroy() }
 }

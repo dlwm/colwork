@@ -43,9 +43,9 @@ async function protectionAction(page, label) {
 test('selection reaches actual cell edges with merged endpoints, narrow columns, zoom and borders', async ({ page }) => {
   await mount(page)
   await page.evaluate(() => {
-    table.columnCountValue = 6
+    table.dimensions.columns = 6
     table.doc.transact(() => { for (let index = 0; index < 6; index++) table.columnWidths.set(String(index), 64) })
-    table.selectRange({ row: 5, column: 0 }, { row: 5, column: 2 })
+    table.selection.selectRange({ row: 5, column: 0 }, { row: 5, column: 2 })
   })
   const checkMerged = async () => {
     const merged = await cell(page, '5:0').boundingBox()
@@ -58,12 +58,12 @@ test('selection reaches actual cell edges with merged endpoints, narrow columns,
   await checkMerged()
   await page.evaluate(() => {
     table.viewport.dispatchEvent(new WheelEvent('wheel', { ctrlKey: true, deltaY: -100, cancelable: true }))
-    table.toggleBorder('outer')
+    table.formatting.toggleBorder('outer')
   })
   await checkMerged()
   await page.evaluate(() => {
     table.setFrozenPanes(2, 3)
-    table.selectRange({ row: 0, column: 0 }, { row: 1, column: 4 })
+    table.selection.selectRange({ row: 0, column: 0 }, { row: 1, column: 4 })
   })
   const first = await cell(page, '0:0').boundingBox()
   const last = await cell(page, '1:4').boundingBox()
@@ -78,7 +78,7 @@ test('frozen selection follows native scrolling before the queued virtual render
   await mount(page)
   await page.evaluate(() => {
     table.setFrozenPanes(2, 3)
-    table.selectRange({ row: 0, column: 0 }, { row: 1, column: 2 })
+    table.selection.selectRange({ row: 0, column: 0 }, { row: 1, column: 2 })
   })
   const differences = await page.evaluate(() => {
     // Delay the expensive virtual render, as can happen during a busy frame.
@@ -126,13 +126,13 @@ test('local and remote highlights stay attached across frozen panes and header s
   await mount(peer, room)
   await page.evaluate(() => {
     table.setFrozenPanes(2, 3)
-    table.selectRange({ row: 0, column: 0 }, { row: 12, column: 5 })
+    table.selection.selectRange({ row: 0, column: 0 }, { row: 12, column: 5 })
   })
   await peer.evaluate(() => {
-    table.selectCell(1, 1, false)
-    table.selectCell(10, 4, true)
+    table.selection.selectCell(1, 1, false)
+    table.selection.selectCell(10, 4, true)
     table.refreshSelection()
-    table.publishSelection()
+    table.selection.publishSelection()
   })
   await expect(page.locator('.colwork-table__remote-selection').first()).toBeAttached()
   const gaps = await page.evaluate(() => {
@@ -161,8 +161,8 @@ test('local and remote highlights stay attached across frozen panes and header s
     await page.evaluate(mode => {
       table.viewport.scrollTop = 0
       table.viewport.scrollLeft = 0
-      if (mode === 'all') table.selectRange({ row: 0, column: 0 }, { row: table.rowCount - 1, column: table.columnCount - 1 }, 'all')
-      else table.selectHeaderRange(mode, 1, false)
+      if (mode === 'all') table.selection.selectRange({ row: 0, column: 0 }, { row: table.rowCount - 1, column: table.columnCount - 1 }, 'all')
+      else table.selection.selectHeaderRange(mode, 1, false)
     }, mode)
     const partialCells = await page.locator('.colwork-table__selection').evaluateAll(overlays => overlays.filter(overlay => {
       const a = overlay.getBoundingClientRect()
@@ -183,7 +183,7 @@ test('local and remote highlights stay attached across frozen panes and header s
   }
   await page.evaluate(() => {
     table.merges.set('6:4-8:4', '1')
-    table.selectHeaderRange('row', 7, false)
+    table.selection.selectHeaderRange('row', 7, false)
   })
   await expect.poll(() => page.evaluate(() => {
     const header = document.querySelector('th[data-selection-axis="row"][data-selection-index="7"]')?.getBoundingClientRect()
@@ -239,17 +239,17 @@ test('lock blocks editing, mixed paste, formatting, merges and affected structur
   const result = await page.evaluate(() => {
     const original = table.cells.get('2:1')
     const style = table.styles.get('2:1')
-    table.clearSelectionContents(); table.toggleFormat('bold'); table.clearFormatting(); table.setStyle('color', '#ff0000'); table.toggleBorder('outer')
-    table.selectRange({ row: 2, column: 0 }, { row: 2, column: 1 })
+    table.clearSelectionContents(); table.formatting.toggleFormat('bold'); table.formatting.clearFormatting(); table.formatting.setStyle('color', '#ff0000'); table.formatting.toggleBorder('outer')
+    table.selection.selectRange({ row: 2, column: 0 }, { row: 2, column: 1 })
     table.mergeSelection()
     table.modifyAxis('row', 0, 1)
-    table.selectRange({ row: 2, column: 0 }, { row: 2, column: 0 })
+    table.selection.selectRange({ row: 2, column: 0 }, { row: 2, column: 0 })
     const left = table.cells.get('2:0')
     const clipboardData = new DataTransfer()
     clipboardData.setData('text/plain', 'changed\tchanged')
     table.viewport.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }))
-    table.selectRange({ row: 3, column: 1 }, { row: 3, column: 1 })
-    table.selectedKey = '3:1'
+    table.selection.selectRange({ row: 3, column: 1 }, { row: 3, column: 1 })
+    table.selection.selectedKey = '3:1'
     table.clearSelectionContents()
     table.undo()
     return { original, actual: table.cells.get('2:1'), style, actualStyle: table.styles.get('2:1'), left, actualLeft: table.cells.get('2:0'), merged: table.merges.has('2:0-2:1') }
@@ -309,7 +309,7 @@ test('merged locks and blank-cell locks survive update-log rebuild without demo 
   const result = await page.evaluate(async () => {
     const { ColworkTable, rebuildYjsSnapshot } = await import('/src/index.ts')
     table.doc.transact(() => { table.cells.clear(); table.styles.clear(); table.merges.clear() })
-    table.selectRange({ row: 2, column: 2 }, { row: 2, column: 2 })
+    table.selection.selectRange({ row: 2, column: 2 }, { row: 2, column: 2 })
     const baseline = table.getYjsSnapshot()
     table.setSelectionLocked(true)
     const snapshot = rebuildYjsSnapshot(JSON.stringify(baseline), JSON.stringify(table.getYjsUpdateLog()))
@@ -389,7 +389,7 @@ test('password protection syncs and survives snapshot/log rebuild; mixed locks u
   const restoredResult = await peer.evaluate(async () => {
     const { ColworkTable, rebuildYjsSnapshot } = await import('/src/index.ts')
     const baseline = table.getYjsSnapshot()
-    table.selectRange({ row: 2, column: 1 }, { row: 2, column: 1 })
+    table.selection.selectRange({ row: 2, column: 1 }, { row: 2, column: 1 })
     await table.setSelectionLocked(true, 'second secret')
     const snapshot = rebuildYjsSnapshot(JSON.stringify(baseline), JSON.stringify(table.getYjsUpdateLog()))
     const root = document.createElement('div'); document.body.append(root)
@@ -398,13 +398,13 @@ test('password protection syncs and survives snapshot/log rebuild; mixed locks u
       snapshot: Uint8Array.from(atob(snapshot.snapshot), c => c.charCodeAt(0)),
     })
     restored.provider.disconnect()
-    restored.selectRange({ row: 2, column: 0 }, { row: 2, column: 1 })
+    restored.selection.selectRange({ row: 2, column: 0 }, { row: 2, column: 1 })
     let error
     try { await restored.setSelectionLocked(false, 'first secret') } catch (failure) { error = failure.message }
     const remaining = restored.locks.size
-    restored.selectRange({ row: 2, column: 0 }, { row: 2, column: 0 })
+    restored.selection.selectRange({ row: 2, column: 0 }, { row: 2, column: 0 })
     await restored.setSelectionLocked(false, 'first secret')
-    restored.selectRange({ row: 2, column: 1 }, { row: 2, column: 1 })
+    restored.selection.selectRange({ row: 2, column: 1 }, { row: 2, column: 1 })
     await restored.setSelectionLocked(false, 'second secret')
     const final = restored.locks.size
     restored.destroy()
@@ -472,15 +472,15 @@ test('freeze rejects partial merged row/column collections without expanding exi
   await page.getByRole('button', { name: '确定', exact: true }).click()
   expect(await page.evaluate(() => [table.frozenRows, table.frozenColumns])).toEqual([1, 0])
   await page.evaluate(() => {
-    table.selectHeaderRange('column', 0, false)
-    table.selectHeaderRange('column', 2, true)
+    table.selection.selectHeaderRange('column', 0, false)
+    table.selection.selectHeaderRange('column', 2, true)
     table.freezeSelection('column')
   })
   expect(await page.evaluate(() => [table.frozenRows, table.frozenColumns])).toEqual([1, 3])
   await expect(page.getByRole('status')).toHaveCount(0)
   await page.evaluate(() => {
     table.merges.set('2:4-4:4', '1')
-    table.selectHeaderRange('row', 4, false)
+    table.selection.selectHeaderRange('row', 4, false)
     table.freezeSelection('row')
   })
   await expect(page.getByRole('status')).toContainText('当前选择包含不完整的合并块')
@@ -492,8 +492,8 @@ test('freeze rejects partial merged row/column collections without expanding exi
   expect(await page.evaluate(() => table.setFrozenPanes(3, 3))).toBe(false)
   await page.getByRole('button', { name: '确定', exact: true }).click()
   await page.evaluate(() => {
-    table.selectHeaderRange('row', 2, false)
-    table.selectHeaderRange('row', 4, true)
+    table.selection.selectHeaderRange('row', 2, false)
+    table.selection.selectHeaderRange('row', 4, true)
     table.freezeSelection('row')
   })
   expect(await page.evaluate(() => [table.frozenRows, table.frozenColumns])).toEqual([5, 3])
@@ -508,7 +508,7 @@ test('merge refuses either frozen boundary but allows ranges wholly within one p
     [{ row: 2, column: 2 }, { row: 2, column: 3 }],
     [{ row: 1, column: 2 }, { row: 2, column: 3 }],
   ]) {
-    await page.evaluate(([anchor, focus]) => table.selectRange(anchor, focus), range)
+    await page.evaluate(([anchor, focus]) => table.selection.selectRange(anchor, focus), range)
     await page.getByRole('button', { name: '合并', exact: true }).click()
     await expect(page.getByRole('status')).toContainText('合并范围同时包含固定和非固定区域')
     await expect(page.getByRole('alertdialog', { name: '操作提示' })).toBeVisible()
@@ -518,10 +518,10 @@ test('merge refuses either frozen boundary but allows ranges wholly within one p
     expect(await page.evaluate(() => table.getYjsSnapshot().snapshot)).toBe(original)
     expect(await page.evaluate(() => [table.frozenRows, table.frozenColumns])).toEqual([2, 3])
   }
-  await page.evaluate(() => table.selectRange({ row: 1, column: 0 }, { row: 1, column: 1 }))
+  await page.evaluate(() => table.selection.selectRange({ row: 1, column: 0 }, { row: 1, column: 1 }))
   await page.getByRole('button', { name: '合并', exact: true }).click()
   await expect(cell(page, '1:0')).toHaveAttribute('colspan', '2')
-  await page.evaluate(() => table.selectRange({ row: 3, column: 4 }, { row: 3, column: 5 }))
+  await page.evaluate(() => table.selection.selectRange({ row: 3, column: 4 }, { row: 3, column: 5 }))
   await page.getByRole('button', { name: '合并', exact: true }).click()
   await expect(cell(page, '3:4')).toHaveAttribute('colspan', '2')
   await expect(page.getByRole('status')).toHaveCount(0)
@@ -535,12 +535,12 @@ test('password hatching and frozen styles follow scroll, zoom and remote style u
   await mount(peer, room)
   await page.evaluate(() => table.setFrozenPanes(2, 3))
   await peer.evaluate(() => {
-    table.selectRange({ row: 1, column: 1 }, { row: 1, column: 1 })
-    table.selectedKey = '1:1'
-    table.setStyle('background', '#fee2e2')
-    table.setStyle('color', '#7c3aed')
-    table.setStyle('fontSize', 18)
-    table.toggleBorder('outer')
+    table.selection.selectRange({ row: 1, column: 1 }, { row: 1, column: 1 })
+    table.selection.selectedKey = '1:1'
+    table.formatting.setStyle('background', '#fee2e2')
+    table.formatting.setStyle('color', '#7c3aed')
+    table.formatting.setStyle('fontSize', 18)
+    table.formatting.toggleBorder('outer')
   })
   await expect(cell(page, '1:1')).toHaveCSS('background-color', 'rgb(254, 226, 226)')
   const before = await cell(page, '1:1').boundingBox()
@@ -565,20 +565,20 @@ test('password hatching and frozen styles follow scroll, zoom and remote style u
   await expect(cell(page, '1:1')).toHaveCSS('background-color', 'rgb(254, 226, 226)')
   await expect(cell(page, '1:1')).toHaveCSS('color', 'rgb(124, 58, 237)')
   await cell(page, '1:1').click()
-  expect(await page.evaluate(() => table.selectionFocus)).toEqual({ row: 1, column: 1 })
+  expect(await page.evaluate(() => table.selection.focus)).toEqual({ row: 1, column: 1 })
   await page.evaluate(() => table.viewport.dispatchEvent(new WheelEvent('wheel', { ctrlKey: true, deltaY: -100, cancelable: true })))
   await expect(cell(page, '1:1')).toHaveCSS('font-size', '19.8px')
   await page.screenshot({ path: testInfo.outputPath('frozen-password-hatching.png') })
   await peer.evaluate(() => table.setSelectionLocked(false, 'hatching password'))
   await expect(cell(page, '1:1')).not.toHaveClass(/is-password-locked/)
   // Formatting changes after freeze must refresh both the style and displayed value.
-  await peer.evaluate(() => { table.cells.set('1:1', '0.5'); table.setStyle('format', 'percent') })
+  await peer.evaluate(() => { table.cells.set('1:1', '0.5'); table.formatting.setStyle('format', 'percent') })
   await expect(cell(page, '1:1').locator('.colwork-table__cell-value')).toHaveText('50%')
-  await peer.evaluate(() => table.clearFormatting())
+  await peer.evaluate(() => table.formatting.clearFormatting())
   await expect(cell(page, '1:1')).toHaveCSS('background-color', 'rgb(255, 255, 255)')
   await expect(cell(page, '1:1').locator('.colwork-table__cell-value')).toHaveText('0.5')
   await peer.evaluate(() => {
-    table.selectRange({ row: 0, column: 4 }, { row: 2, column: 5 })
+    table.selection.selectRange({ row: 0, column: 4 }, { row: 2, column: 5 })
     table.mergeSelection()
   })
   await expect(page.getByRole('status')).toContainText('已取消与合并块冲突的固定行列')
@@ -602,7 +602,7 @@ async function dragHeaders(page, axis, from, to) {
   await page.mouse.move(end.x, end.y, { steps: 12 })
 }
 async function headerSelection(page) {
-  return page.evaluate(() => ({ mode: table.selectionMode, anchor: table.selectionAnchor, focus: table.selectionFocus }))
+  return page.evaluate(() => ({ mode: table.selection.mode, anchor: table.selection.anchor, focus: table.selection.focus }))
 }
 
 test('header dragging retains its anchor forward/backward, stops on release, and supports Shift', async ({ page }) => {
@@ -712,7 +712,7 @@ test('frozen boundaries follow panes and grouped controls fit desktop and narrow
   expect(overflow).toEqual([])
   await page.screenshot({ path: testInfo.outputPath('organized-mobile.png') })
   await page.setViewportSize({ width: 390, height: 320 })
-  await page.evaluate(() => table.showCellContextMenu(innerWidth - 1, innerHeight - 1))
+  await page.evaluate(() => table.pointer.showCellContextMenu(innerWidth - 1, innerHeight - 1))
   const bounds = await menu.boundingBox()
   expect(bounds.x).toBeGreaterThanOrEqual(0)
   expect(bounds.y).toBeGreaterThanOrEqual(0)

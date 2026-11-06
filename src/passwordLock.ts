@@ -1,11 +1,5 @@
 /** Versioned password verifier. Never stores the password or encrypts cell data. */
-type PasswordLock = {
-  version: 1
-  algorithm: 'PBKDF2-SHA-256'
-  iterations: 600000
-  salt: string
-  verifier: string
-}
+import type { PasswordLock } from './model-schema'
 const iterations = 600000
 const hex = (bytes: Uint8Array) => Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('')
 

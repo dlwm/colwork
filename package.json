@@ -1,6 +1,6 @@
 {
   "name": "@kuzuma/colwork",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -10,14 +10,15 @@
     "server:test": "node server/index.mjs --mode test",
     "rebuild:yjs": "node script/rebuild-yjs.mjs",
     "build": "npm run build:lib",
-    "build:lib": "tsc --noEmit && vite build --config vite.lib.config.ts",
+    "build:lib": "tsc --noEmit && vite build --config vite.lib.config.ts && vite build --config vite.model.config.ts",
     "test:e2e": "playwright test",
     "build:site": "node script/demo.mjs build",
     "dev:cloudflare": "npm run build:site && wrangler dev --config config/cloudflare/wrangler.dev.json --persist-to .wrangler/state",
     "deploy:check": "node script/deploy-cloudflare.mjs --dry-run",
     "deploy": "node script/deploy-cloudflare.mjs",
     "test:cloudflare": "node --test test/cloudflare/*.test.mjs",
-    "prepublishOnly": "npm run build:lib"
+    "prepublishOnly": "npm run build:lib",
+    "test:model": "node --test test/model/*.test.mjs"
   },
   "dependencies": {
     "y-protocols": "^1.0.7",
@@ -51,7 +52,17 @@
       "import": "./dist/colwork.js",
       "require": "./dist/colwork.umd.cjs"
     },
-    "./colwork.css": "./dist/colwork.css"
+    "./colwork.css": "./dist/colwork.css",
+    "./model": {
+      "import": {
+        "types": "./dist/model.d.ts",
+        "default": "./dist/model.js"
+      },
+      "require": {
+        "types": "./dist/model.d.cts",
+        "default": "./dist/model.cjs"
+      }
+    }
   },
   "files": [
     "dist"
