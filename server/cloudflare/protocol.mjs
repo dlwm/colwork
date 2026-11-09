@@ -44,6 +44,7 @@ export function receiveMessage(doc, state, socket, message) {
   const decoder = decoding.createDecoder(new Uint8Array(message))
   const type = decoding.readVarUint(decoder)
   if (type === 0) {
+    if (socket.deserializeAttachment()?.canWrite === false && decoding.peekVarUint(decoder) !== sync.messageYjsSyncStep1) return
     const response = encoding.createEncoder()
     encoding.writeVarUint(response, 0)
     sync.readSyncMessage(decoder, response, doc, socket)

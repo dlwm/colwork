@@ -27,16 +27,21 @@ const version: 1 = model.COLWORK_SCHEMA_VERSION
 const invalid: number = snapshot.cells['0:0']
 `
 const browserConsumer = `
-import { ColworkTable, type ColworkTableOptions, type EditingState } from '@kuzuma/colwork'
+import { ColworkTable, type ColworkTableOptions, type ColworkViewPolicy, type EditingState } from '@kuzuma/colwork'
 import * as Y from 'yjs'
 import { Awareness } from 'y-protocols/awareness'
 const document = new Y.Doc()
 const awareness = new Awareness(document)
-const options: ColworkTableOptions = { transport: 'external', collaboration: { document, awareness }, user: 'test', onEditingChange(state: EditingState) { state.dirty } }
+const viewPolicy: ColworkViewPolicy = { watermark: { viewerText: 'Viewer', fixedText: 'Internal' }, allowExport: false }
+const options: ColworkTableOptions = { transport: 'external', collaboration: { document, awareness }, user: 'test', viewPolicy, onEditingChange(state: EditingState) { state.dirty } }
 const table = new ColworkTable(globalThis.document.createElement('div'), options)
 table.commitEditing()
 table.cancelEditing()
 table.setReadOnly(true)
+table.setViewPolicy({ allowExport: true })
+const allowed: boolean = table.canExport()
+// @ts-expect-error Permission must be supplied as a boolean.
+table.setViewPolicy({ allowExport: 'false' })
 // @ts-expect-error Built-in transport continues to require a room.
 const missingRoom: ColworkTableOptions = { transport: 'websocket', user: 'test' }
 // @ts-expect-error External documents cannot use widget-owned snapshot initialization.

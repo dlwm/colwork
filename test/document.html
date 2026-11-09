@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Colwork · 受保护文档</title>
+  </head>
+  <body class="vue-page">
+    <main class="test-shell">
+      <section class="panel">
+        <div class="user-settings">
+          <button id="download" type="button" disabled>导出快照</button>
+          <button id="xlsx" type="button" disabled>导出 Excel</button>
+          <label>导入 Excel <input id="import" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" disabled /></label>
+          <span id="status" role="status">正在验证访问权限</span>
+        </div>
+        <div id="table"></div>
+      </section>
+    </main>
+    <script type="module" src="./private-document.ts"></script>
+  </body>
+</html>

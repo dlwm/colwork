@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Colwork · 工作簿示例</title>
+  </head>
+  <body class="vue-page">
+    <main class="test-shell">
+      <section class="panel">
+        <div class="user-settings">
+          <label>导入 Excel <input id="import" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" /></label>
+          <button id="download" type="button">导出 Excel</button>
+          <span id="status" role="status"></span>
+          <a class="user-settings__tool-link" href="/">返回首页</a>
+        </div>
+        <div id="table"></div>
+      </section>
+    </main>
+    <script type="module" src="./workbook.ts"></script>
+  </body>
+</html>

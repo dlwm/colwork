@@ -3,8 +3,9 @@ import { ColworkTable } from '@colwork-demo'
 import '@colwork-demo/style'
 import { classifyLog, formatLog, loadLogTypes, logTypes, saveLogTypes, type LogEntry, type LogType } from '../log'
 import { splitHexGroups, splitLogText } from '../identifiers'
-import { downloadJson } from '../archive'
-import { loadUserSettings, saveUserSettings, websocketUrl, collaborationTransport, cloudflareDeployment, type UserSettings } from '../user-settings'
+import { downloadTableArchive } from '../archive'
+import { demoImages } from '../demo-images'
+import { loadUserSettings, saveUserSettings, websocketUrl, collaborationTransport, cloudflareDeployment, demoAllowsExport, demoViewPolicy, type UserSettings } from '../user-settings'
 import '../test.css'
 
 const transport = collaborationTransport()
@@ -57,7 +58,7 @@ const App = defineComponent({
     }
     const mountTable = () => {
       table?.destroy()
-      if (tableRoot.value) table = new ColworkTable(tableRoot.value, { room: 'colwork-demo', user: applied.value.nickname, userColor: applied.value.color, transport, initializeAfterSync: cloudflareDeployment, websocketUrl: websocketUrl(applied.value), onLog: appendLog })
+      if (tableRoot.value) table = new ColworkTable(tableRoot.value, { room: 'colwork-demo', user: applied.value.nickname, userColor: applied.value.color, transport, initializeAfterSync: cloudflareDeployment, websocketUrl: websocketUrl(applied.value), onLog: appendLog, viewPolicy: demoViewPolicy(applied.value.nickname), images: demoImages })
     }
     const applySettings = async () => {
       applied.value = { ...draft.value, delay: Math.max(0, Math.min(30000, Number(draft.value.delay) || 0)) }
@@ -74,8 +75,8 @@ const App = defineComponent({
         h('span', { class: 'user-settings__delay' }, [h('input', { value: draft.value.delay, type: 'number', min: 0, max: 30000, placeholder: '延时', onInput: (event: Event) => { draft.value.delay = Number((event.target as HTMLInputElement).value) } }), h('span', { class: 'user-settings__unit' }, 'ms')]),
          h('input', { value: draft.value.color, type: 'color', onInput: (event: Event) => { draft.value.color = (event.target as HTMLInputElement).value } }),
           h('button', { type: 'button', onClick: applySettings }, '应用'),
-          h('button', { type: 'button', onClick: () => table && downloadJson('colwork.snapshot.json', table.getYjsSnapshot()) }, '导出快照'),
-          h('button', { type: 'button', onClick: () => table && downloadJson('colwork.update-log.json', table.getYjsUpdateLog()) }, '导出更新日志'),
+          h('button', { type: 'button', disabled: !demoAllowsExport, onClick: () => downloadTableArchive(table, 'snapshot') }, '导出快照'),
+          h('button', { type: 'button', disabled: !demoAllowsExport, onClick: () => downloadTableArchive(table, 'update-log') }, '导出更新日志'),
           h('a', { class: 'user-settings__tool-link', href: '/test/index.html' }, '快照工具'),
       ]),
       h('div', { ref: tableRoot }),

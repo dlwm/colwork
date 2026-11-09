@@ -36,7 +36,7 @@
 .colwork-table__viewport { grid-area: 2 / 1; position: relative; width: 100%; height: min(560px, 55vh); min-height: 240px; overflow-x: auto; overflow-y: auto; scrollbar-gutter: stable; }
 .colwork-table__viewport:focus { outline: 0; }
 .colwork-table table { width: max-content; min-width: 100%; min-width: calc(900px * var(--colwork-zoom, 1)); border-collapse: separate; border-spacing: 0; table-layout: fixed; }
-.colwork-table th, .colwork-table td { height: calc(56px * var(--colwork-zoom, 1)); border-top: 1px solid #edf0f3; border-right: 1px solid #edf0f3; padding: 0; text-align: left; }
+.colwork-table th, .colwork-table td { border-top: 1px solid #edf0f3; border-right: 1px solid #edf0f3; padding: 0; text-align: left; }
 .colwork-table table, .colwork-table th, .colwork-table td, .colwork-table__cell-value { user-select: none; }
 .colwork-table th:last-child, .colwork-table td:last-child { border-right: 0; }
 .colwork-table thead th { height: calc(42px * var(--colwork-zoom, 1)); padding: 0 calc(14px * var(--colwork-zoom, 1)); background: #f8fafc; color: #718096; font-size: calc(12px * var(--colwork-zoom, 1)); letter-spacing: .08em; text-transform: uppercase; }
@@ -50,6 +50,7 @@
 .colwork-table table.is-banded-rows tbody tr.is-banded-row td { background: #f8fafc; }
 .colwork-table td { position: relative; z-index: 0; overflow: visible; cursor: default; padding: 0 calc(14px * var(--colwork-zoom, 1)); color: #334155; vertical-align: top; font-size: calc(1rem * var(--colwork-zoom, 1)); white-space: pre; text-overflow: clip; }
 .colwork-table__cell-value { display: block; overflow: hidden; transform-origin: left center; }
+.colwork-table__cell-image { display: block; width: 100%; height: 100%; padding: 2px 0; object-fit: contain; }
 .colwork-table__resize-handle { position: absolute; z-index: 6; display: block; opacity: 0; background: #4777b8; transition: opacity .12s ease; }
 .colwork-table__resize-handle:hover, .colwork-table__resize-handle:active { opacity: 1; }
 .colwork-table__resize-handle--column { top: 0; right: 0; width: 8px; height: 100%; cursor: col-resize; }
@@ -58,7 +59,7 @@
 .colwork-table__selection, .colwork-table__remote-selection { position: absolute; z-index: 3; border: 2px solid; background: transparent; pointer-events: none; }
 .colwork-table__remote-selection { border-style: dashed; opacity: .75; }
 .colwork-table__remote-cursor { position: absolute; top: -1px; left: -1px; z-index: 2; max-width: 90px; overflow: hidden; padding: 2px 4px; border-radius: 3px; color: #fff; font-size: 9px; line-height: 12px; pointer-events: none; text-overflow: ellipsis; white-space: nowrap; }
-.colwork-table__editor { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; overflow: hidden; resize: none; border: 2px solid #4777b8; padding: 8px 12px; color: #334155; background: #f7fbff; font: inherit; line-height: 1.35; outline: 0; cursor: text; user-select: text; }
+.colwork-table__editor { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; overflow: hidden; resize: none; border: max(1px, calc(2px * var(--colwork-zoom, 1))) solid #4777b8; padding: 0 12px; color: #334155; background: #f7fbff; font: inherit; line-height: 1.25; outline: 0; cursor: text; user-select: text; }
 .colwork-table__view-menu button { border: 0; border-radius: 4px; padding: 6px 8px; color: #475569; background: transparent; cursor: pointer; text-align: left; white-space: nowrap; font: inherit; font-size: 11px; }
 .colwork-table__view-menu button:hover, .colwork-table__view-menu button:focus-visible { background: #eff6ff; color: #1d4ed8; }
 .colwork-table__view-control:focus-within .colwork-table__view-menu { display: flex; flex-direction: column; gap: 5px; }
@@ -96,6 +97,18 @@
 .colwork-table__frozen-boundaries { grid-area: 2 / 1; position: relative; align-self: start; justify-self: start; overflow: hidden; z-index: 13; pointer-events: none; }
 .colwork-table__frozen-boundary--row { height: 2px; box-shadow: 0 3px 5px var(--colwork-freeze-shadow); }
 .colwork-table__frozen-boundary--column { width: 2px; box-shadow: 3px 0 5px var(--colwork-freeze-shadow); }
+.colwork-table__row-view { max-width: calc(100vw - 32px); max-height: 85vh; border: 1px solid #dde3ea; border-radius: 12px; padding: 20px; color: #334155; font: 14px system-ui, sans-serif; }
+.colwork-table__row-view::backdrop { background: #17203355; }
+.colwork-table__row-view form, .colwork-table__row-view form > div { display: grid; gap: 8px; }
+.colwork-table__row-view form > div:first-of-type, .colwork-table__row-view form > div:last-child, .colwork-table__row-view form > div > div { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.colwork-table__row-view h3, .colwork-table__row-view p { margin: 0; }
+.colwork-table__row-view [role='alert'] { color: #b42318; }
+.colwork-table__row-view input, .colwork-table__row-view select, .colwork-table__row-view button { font: inherit; }
+.colwork-workbook__tabs { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 8px; }
+.colwork-workbook__tabs button { padding: 6px 10px; color: #334155; background: #f8fafc; border: 1px solid #d9e1ea; border-radius: 5px; cursor: pointer; }
+.colwork-workbook__tabs button[aria-pressed='true'] { color: #1d4ed8; background: #eff6ff; border-color: #93c5fd; }
+.colwork-workbook__tabs button:disabled { opacity: .5; cursor: not-allowed; }
+.colwork-workbook__status:not(:empty) { display: block; color: #b42318; margin: 0 0 8px; }
 @media (max-width: 600px) {
   .colwork-table__toolbar { padding: 4px 8px; }
   .colwork-table__toolbar-row { gap: 6px 12px; }

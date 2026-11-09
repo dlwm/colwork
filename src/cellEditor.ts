@@ -4,11 +4,13 @@ import { normalizeCellText } from './unicode'
 
 type EditorHost = {
   table: HTMLTableElement
+  id(key: string): string | undefined
+  position(id: string): string | undefined
   canEdit(key: string): boolean
   read(key: string): string | undefined
   write(key: string, value: string): void
   applyStyle(element: HTMLElement, key: string): void
-  displayValue(key: string): string
+  renderContent(element: HTMLElement, key: string): void
   announce(cursor: CellPosition & { offset?: number }): void
   focus(): CellPosition | undefined
   clearEditingPresence(): void
@@ -19,7 +21,8 @@ type EditorHost = {
 
 export class CellEditor {
   input?: HTMLTextAreaElement
-  key?: string
+  private id?: string
+  get key() { return this.id === undefined ? undefined : this.host.position(this.id) }
   private original = ''
   constructor(private readonly host: EditorHost) {}
 
@@ -27,7 +30,8 @@ export class CellEditor {
     if (!this.host.canEdit(key) || this.key === key) return
     this.finish(true)
     cell = this.host.table.querySelector<HTMLTableCellElement>(`td[data-key="${key}"]`) ?? cell
-    this.key = key
+    this.id = this.host.id(key)
+    if (this.id === undefined) return
     this.original = this.host.read(key) ?? ''
     const input = document.createElement('textarea')
     input.className = 'colwork-table__editor'
@@ -49,22 +53,24 @@ export class CellEditor {
   }
 
   finish(commit: boolean) {
-    if (!this.input || !this.key) return
+    if (!this.input) return
     const key = this.key
     const input = this.input
     // Clear state before removing a focused textarea, which synchronously fires blur.
     this.input = undefined
-    this.key = undefined
-    if (commit && this.host.canEdit(key) && input.value !== this.host.read(key)) this.host.write(key, normalizeCellText(input.value))
+    this.id = undefined
+    if (key && commit && this.host.canEdit(key) && input.value !== this.original && input.value !== this.host.read(key)) {
+      this.host.write(key, normalizeCellText(input.value))
+    }
     this.original = ''
     this.host.clearEditingPresence()
     input.remove()
-    const cell = this.host.table.querySelector<HTMLTableCellElement>(`td[data-key="${key}"]`)
-    if (!cell) { this.host.render(); this.host.changed({ editing: false, dirty: false }); return }
+    const cell = key && this.host.table.querySelector<HTMLTableCellElement>(`td[data-key="${key}"]`)
+    if (!key || !cell) { this.host.render(); this.host.changed({ editing: false, dirty: false }); return }
     this.host.table.querySelectorAll('td.is-editing').forEach(element => element.classList.remove('is-editing'))
     const value = cell.querySelector<HTMLElement>('.colwork-table__cell-value') ?? document.createElement('span')
     value.className = 'colwork-table__cell-value'
-    value.textContent = this.host.displayValue(key)
+    this.host.renderContent(value, key)
     if (!value.parentElement) cell.append(value)
     Array.from(cell.childNodes).forEach(node => {
       if (node !== value && node.nodeType === Node.TEXT_NODE) node.remove()

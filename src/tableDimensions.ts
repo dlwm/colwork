@@ -3,6 +3,7 @@ import type { SheetDocument } from './sheetDocument'
 import type { TableSelection } from './tableSelection'
 import { selectionFocusForMode, type AwarenessSelection } from './selection'
 import type { ColworkTableOptions } from './options'
+import { MAIN_SHEET_ID } from './workbookModel'
 
 /** Logical local capacity grows to include document data and collaborators' selections. */
 export class TableDimensions {
@@ -23,11 +24,11 @@ export class TableDimensions {
     this.columns = Math.max(this.columns, size.columns)
     return changed
   }
-  expandRemote(awareness: Awareness) {
+  expandRemote(awareness: Awareness, sheetId = MAIN_SHEET_ID) {
     const rows = this.rows
     const columns = this.columns
     awareness.getStates().forEach((state, clientId) => {
-      if (clientId === awareness.clientID) return
+      if (clientId === awareness.clientID || (state.sheetId ?? MAIN_SHEET_ID) !== sheetId) return
       const selection = state.selection as AwarenessSelection | undefined
       if (!selection?.anchor || !selection.focus) return
       this.rows = Math.max(this.rows, selection.anchor.row + 1, selection.focus.row + 1)

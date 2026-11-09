@@ -15,6 +15,8 @@ type ToolbarActions = {
   freezeSelection(axis: 'row' | 'column'): void
   setFrozenPanes(rows: number, columns: number): unknown
   render(): void
+  openRowView(): void
+  chooseImage?(): void
   setStyle(format: 'color' | 'background' | 'align' | 'fontSize' | 'format', value: string | number | undefined): void
   toggleFormat(format: BooleanStyleKey): void
   clearFormatting(): void
@@ -82,6 +84,14 @@ export function buildToolbar(actions: ToolbarActions) {
       button.addEventListener('click', action)
       cellGroup.append(button)
     })
+    if (actions.chooseImage) {
+      const button = document.createElement('button')
+      button.type = 'button'
+      button.className = 'colwork-table__format'
+      button.textContent = '插入图片'
+      button.addEventListener('click', actions.chooseImage)
+      cellGroup.append(button)
+    }
     protectionGroup.querySelector('.colwork-table__group-label')?.remove()
     const protectionButton = document.createElement('button')
 
@@ -141,6 +151,13 @@ export function buildToolbar(actions: ToolbarActions) {
     })
     viewControl.append(viewButton, viewMenu)
     viewGroup.append(viewControl)
+    const rowView = document.createElement('button')
+    rowView.type = 'button'
+    rowView.className = 'colwork-table__format'
+    rowView.textContent = '排序筛选'
+    rowView.title = '仅调整当前视图'
+    rowView.addEventListener('click', actions.openRowView)
+    viewGroup.append(rowView)
     ;[
       ['bold', 'B', '加粗'],
       ['italic', 'I', '斜体'],

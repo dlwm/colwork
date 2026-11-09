@@ -3,32 +3,99 @@ import { cellKey, containsPosition, type CellPosition, type CellRange } from './
 import { selectionRange } from './selection'
 import { getSheetMaps } from './model-validation'
 import { parseCellKey, parseMergeKey } from './model-schema'
+import { SheetCoordinates, type ProjectedMap, type SheetAxis } from './sheetCoordinates'
+import { FormulaBook } from './formulas'
+import { MAIN_SHEET_ID } from './workbookModel'
+import type { ColworkRowView } from './options'
+import { imageLabel, readCellImage } from './cellImage'
+
+const rowCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
 
 /** Data operations shared by the view. This service never owns its document's lifetime. */
 export class SheetDocument {
-  readonly cells: Y.Map<string>
-  readonly styles: Y.Map<string>
-  readonly rowHeights: Y.Map<number>
-  readonly columnWidths: Y.Map<number>
-  readonly merges: Y.Map<string>
-  readonly locks: Y.Map<string>
+  readonly cells: ProjectedMap<string>
+  readonly styles: ProjectedMap<string>
+  readonly rowHeights: ProjectedMap<number>
+  readonly columnWidths: ProjectedMap<number>
+  readonly merges: ProjectedMap<string>
+  readonly locks: ProjectedMap<string>
+  readonly coordinates: SheetCoordinates
+  readonly formulas: FormulaBook
   private mergeCache?: CellRange[]
   private readonly onMergesChange = () => { this.mergeCache = undefined }
+  private readonly beforeObservers = (transaction: Y.Transaction) => {
+    if (transaction.changed.size) this.formulas.reset()
+    const { row, column } = this.coordinates.edits
+    if (!transaction.changed.has(row) && !transaction.changed.has(column)) return
+    this.coordinates.invalidate()
+    this.mergeCache = undefined
+  }
 
-  constructor(readonly doc: Y.Doc, readonly origin: unknown = null) {
-    const maps = getSheetMaps(doc)
+  constructor(readonly doc: Y.Doc, readonly origin: unknown = null, readonly sheetId = MAIN_SHEET_ID) {
+    this.coordinates = new SheetCoordinates(doc, sheetId)
+    this.formulas = new FormulaBook(doc)
+    const maps = this.coordinates.project(getSheetMaps(doc, sheetId))
     this.cells = maps.cells
     this.styles = maps.styles
     this.rowHeights = maps.rowHeights
     this.columnWidths = maps.columnWidths
     this.merges = maps.merges
     this.locks = maps.locks
-    this.merges.observe(this.onMergesChange)
+    this.merges.raw.observe(this.onMergesChange)
+    doc.on('beforeObserverCalls', this.beforeObservers)
+  }
+
+  readCell(key: string) {
+    const value = this.cells.get(key) ?? ''
+    return readCellImage(value) ? '' : this.formulas.source(value)
+  }
+
+  displayCell(key: string) {
+    const id = this.coordinates.cellId(key)
+    if (!id) return ''
+    const raw = this.cells.raw.get(id) ?? ''
+    const image = readCellImage(raw)
+    return image ? imageLabel(image) : this.formulas.display(this.sheetId, id, raw)
+  }
+
+  writeCell(key: string, value: string) { this.cells.set(key, this.formulas.store(value, this.sheetId)) }
+
+  canonicalKey(id: string) {
+    const [rowId, columnId] = id.split(':')
+    const { row, column } = this.coordinates.axes
+    const r = row.positionOf(rowId), c = column.positionOf(columnId)
+    return r === undefined || c === undefined ? undefined : `${r}:${c}`
+  }
+
+  applyRowView(view: ColworkRowView) {
+    this.coordinates.setRowOrder(undefined)
+    this.mergeCache = undefined
+    const filters = (view.filters ?? []).map(filter => ({ ...filter, contains: filter.contains.toLowerCase() }))
+    if (!view.sort && !filters.length) return
+    if (this.getMergeRanges().some(range => range.start.row !== range.end.row)) throw new Error('跨行合并的工作表暂不支持排序筛选')
+    const extent = this.getContentSize().rows
+    if (extent > 100000) throw new RangeError('排序筛选最多处理十万行')
+    const header = Math.min(extent, view.headerRows ?? 0)
+    const rows = Array.from({ length: extent - header }, (_, index) => index + header).filter(row =>
+      filters.every(filter => this.displayCell(`${row}:${filter.column}`).toLowerCase().includes(filter.contains)))
+    if (view.sort) {
+      const { column, direction } = view.sort
+      const values = new Map(rows.map(row => [row, this.displayCell(`${row}:${column}`)]))
+      rows.sort((a, b) => {
+        const left = values.get(a)!, right = values.get(b)!
+        if (!left || !right) return Number(!left) - Number(!right)
+        const numeric = left.trim() && right.trim() && Number.isFinite(Number(left)) && Number.isFinite(Number(right))
+        const compare = numeric ? Number(left) - Number(right) : rowCollator.compare(left, right)
+        return compare * (direction === 'asc' ? 1 : -1) || a - b
+      })
+    }
+    this.coordinates.setRowOrder([...Array.from({ length: header }, (_, index) => index), ...rows], extent, filters.length > 0)
+    this.mergeCache = undefined
   }
 
   getContentSize() {
-    let rows = 1
-    let columns = 1
+    let rows = this.coordinates.extent('row')
+    let columns = this.coordinates.extent('column')
     for (const key of [...this.cells.keys(), ...this.styles.keys(), ...this.locks.keys()]) {
       const position = parseCellKey(key)
       if (!position) continue
@@ -107,7 +174,10 @@ export class SheetDocument {
     return ranges
   }
 
-  destroy() { this.merges.unobserve(this.onMergesChange) }
+  destroy() {
+    this.merges.raw.unobserve(this.onMergesChange)
+    this.doc.off('beforeObserverCalls', this.beforeObservers)
+  }
 
   expandSelectionToMerges(anchor: CellPosition, focus: CellPosition) {
     let range = selectionRange(anchor, focus)
@@ -141,33 +211,26 @@ export class SheetDocument {
     }))
   }
 
-  modifyAxis(axis: 'row' | 'column', index: number, amount: number, removeCount = 0) {
-    const maps = [this.cells, this.styles]
+  modifyAxis(axis: SheetAxis, index: number, amount: number, removeCount = 0) {
     this.doc.transact(() => {
-      maps.forEach((map) => {
-        const entries = Array.from(map.entries())
-        map.clear()
-        entries.forEach(([key, value]) => {
-          const [row, column] = key.split(':').map(Number)
-          const coordinate = axis === 'row' ? row : column
-          if (removeCount && coordinate >= index && coordinate < index + removeCount) return
-          const nextCoordinate = coordinate >= index + removeCount ? coordinate + amount : coordinate
-          const nextKey = axis === 'row' ? cellKey({ row: nextCoordinate, column }) : cellKey({ row, column: nextCoordinate })
-          map.set(nextKey, value)
-        })
-      })
-      const merges = this.getMergeRanges()
-      this.merges.clear()
-      merges.forEach((range) => {
-        const start = axis === 'row' ? range.start.row : range.start.column
-        const end = axis === 'row' ? range.end.row : range.end.column
-        if (removeCount && start < index + removeCount && end >= index) return
-        const shift = start >= index + removeCount ? amount : 0
-        const next = axis === 'row'
-          ? { start: { row: range.start.row + shift, column: range.start.column }, end: { row: range.end.row + shift, column: range.end.column } }
-          : { start: { row: range.start.row, column: range.start.column + shift }, end: { row: range.end.row, column: range.end.column + shift } }
-        this.merges.set(this.mergeKey(next), '1')
-      })
+      if (removeCount) {
+        const end = index + removeCount
+        for (const map of [this.cells, this.styles]) {
+          for (const key of map.keys()) {
+            const position = parseCellKey(key)
+            if (position && position[axis] >= index && position[axis] < end) map.delete(key)
+          }
+        }
+        const sizes = axis === 'row' ? this.rowHeights : this.columnWidths
+        for (let position = index; position < end; position++) sizes.delete(String(position))
+        for (const range of this.getMergeRanges()) {
+          if (range.start[axis] < end && range.end[axis] >= index) this.merges.delete(this.mergeKey(range))
+        }
+        this.coordinates.remove(axis, index, removeCount)
+      } else {
+        this.coordinates.insert(axis, index, amount)
+      }
+      this.mergeCache = undefined
     }, this.origin)
   }
 }

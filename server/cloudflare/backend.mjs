@@ -1,5 +1,8 @@
 import { DurableObject } from 'cloudflare:workers'
 import { Y, createPresence, syncRequest, syncUpdate, awarenessMessage, receiveMessage, removePresence } from './protocol.mjs'
+import { documentAccess, documentIdPattern, privateJson } from './document-access.mjs'
+import { exportYjsSnapshot } from '../../src/model.ts'
+import { handleDemoImage } from './demo-images.mjs'
 
 const chunkSize = 64 * 1024
 const json = (value, status = 200) => Response.json(value, { status })
@@ -47,6 +50,7 @@ export class ColworkRoom extends DurableObject {
   broadcast(message) {
     for (const socket of this.ctx.getWebSockets()) {
       if (socket.readyState === WebSocket.OPEN) {
+        if (this.closeExpired(socket)) continue
         try { socket.send(message) } catch { this.webSocketClose(socket) }
       }
     }
@@ -54,6 +58,16 @@ export class ColworkRoom extends DurableObject {
 
   async fetch(request) {
     const url = new URL(request.url)
+    if (url.pathname.startsWith('/api/demo-images') && this.env.COLWORK_DEMO_IMAGES === '1') return handleDemoImage(this.sql, request)
+    if (url.pathname === '/internal/export') {
+      return Response.json(exportYjsSnapshot(this.doc, { room: url.searchParams.get('room') ?? undefined }), {
+        headers: {
+          'Cache-Control': 'private, no-store',
+          'Content-Disposition': 'attachment; filename="colwork.snapshot.json"',
+          'X-Content-Type-Options': 'nosniff',
+        },
+      })
+    }
     if (url.pathname === '/api/users' && request.method === 'POST') {
       try {
         const text = await request.text()
@@ -74,8 +88,14 @@ export class ColworkRoom extends DurableObject {
     if (request.method !== 'GET' || request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') return json({ error: 'WebSocket upgrade required' }, 426)
     const [client, server] = Object.values(new WebSocketPair())
     this.ctx.acceptWebSocket(server)
-    server.serializeAttachment({ delay: Number(request.headers.get('x-colwork-delay')) || 0, presence: [] })
-    server.send(syncRequest(this.doc))
+    const isPrivate = url.pathname === '/internal/private-socket'
+    const canWrite = !isPrivate || request.headers.get('x-colwork-can-edit') === 'true'
+    server.serializeAttachment({
+      delay: isPrivate ? 0 : Number(request.headers.get('x-colwork-delay')) || 0,
+      expiresAt: isPrivate ? Number(request.headers.get('x-colwork-expires-at')) : undefined,
+      canWrite, presence: [],
+    })
+    if (canWrite) server.send(syncRequest(this.doc))
     if (this.presence.states.size) server.send(awarenessMessage(this.presence, [...this.presence.states.keys()]))
     return new Response(null, { status: 101, webSocket: client })
   }
@@ -87,7 +107,7 @@ export class ColworkRoom extends DurableObject {
     const current = previous.then(async () => {
       const delay = socket.deserializeAttachment()?.delay ?? 0
       if (delay) await new Promise(resolve => setTimeout(resolve, delay))
-      if (socket.readyState === WebSocket.OPEN) receiveMessage(this.doc, this.presence, socket, message)
+      if (socket.readyState === WebSocket.OPEN && !this.closeExpired(socket)) receiveMessage(this.doc, this.presence, socket, message)
     }).catch(() => { socket.close(1003, 'Invalid collaboration message') })
     this.queues.set(socket, current)
     await current
@@ -103,12 +123,51 @@ export class ColworkRoom extends DurableObject {
     removePresence(this.presence, socket)
     try { socket.close(1011, 'Connection error') } catch {}
   }
+
+  closeExpired(socket) {
+    const expiresAt = socket.deserializeAttachment()?.expiresAt
+    if (expiresAt === undefined || Date.now() < expiresAt) return false
+    try { socket.close(1008, 'Login expired') } catch {}
+    return true
+  }
 }
 
 export default {
   async fetch(request, env) {
     const url = new URL(request.url)
     if (url.pathname === '/health') return json({ status: 'ok', service: 'colwork-backend' })
+    if (env.COLWORK_DEMO_IMAGES === '1' && (url.pathname === '/api/demo-images' || url.pathname.startsWith('/api/demo-images/'))) {
+      if (request.method === 'POST' && (url.pathname !== '/api/demo-images' || request.headers.get('Origin') !== url.origin)) {
+        return json({ error: 'Origin denied' }, 403)
+      }
+      return env.ROOMS.getByName('local-demo-images').fetch(request)
+    }
+    const documentRoute = url.pathname.match(/^\/api\/documents\/([^/]+)\/(view-policy|export)$/)
+    const privateSocket = url.pathname.match(/^\/rooms\/private\/([^/]+)$/)
+    if (documentRoute || privateSocket) {
+      const room = (documentRoute ?? privateSocket)[1]
+      if (!documentIdPattern.test(room)) return privateJson({ error: 'Invalid document id' }, 400)
+      if (request.method !== 'GET') return privateJson({ error: 'Method not allowed' }, 405)
+      if (privateSocket) {
+        if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') return privateJson({ error: 'WebSocket upgrade required' }, 426)
+        if (request.headers.get('Origin') !== url.origin) return privateJson({ error: 'Origin denied' }, 403)
+      }
+      const access = await documentAccess(request, env, room)
+      if (access instanceof Response) return access
+      if (documentRoute?.[2] === 'view-policy') {
+        return privateJson({ displayName: access.displayName, canEdit: access.canEdit, viewPolicy: access.viewPolicy })
+      }
+      const storage = env.ROOMS.getByName(`private-room:${room}`)
+      if (documentRoute) {
+        if (!access.viewPolicy.allowExport) return privateJson({ error: 'Export denied' }, 403)
+        return storage.fetch(new URL(`/internal/export?room=${encodeURIComponent(room)}`, url))
+      }
+      const headers = new Headers(request.headers)
+      headers.delete('Cookie')
+      headers.set('x-colwork-can-edit', String(access.canEdit))
+      headers.set('x-colwork-expires-at', String(access.expiresAt))
+      return storage.fetch(new Request(new URL('/internal/private-socket', url), { headers }))
+    }
     if (url.pathname === '/api/users') return env.ROOMS.getByName('users').fetch(request)
     const match = url.pathname.match(/^\/rooms\/([^/]+)$/)
     if (match) {

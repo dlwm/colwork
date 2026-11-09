@@ -2,6 +2,7 @@ import { cellKey, containsPosition, type CellPosition } from './range'
 import { selectionRange, type SelectionMode } from './selection'
 import type { SheetDocument } from './sheetDocument'
 import type { CollaborationSession } from './collaboration'
+import { MAIN_SHEET_ID } from './workbookModel'
 type SelectionHost = {
   sheet: SheetDocument
   session: CollaborationSession
@@ -48,10 +49,22 @@ export class TableSelection {
   }
 
   updateAwareness(fields: Record<string, unknown> = {}) {
+    const { sheet } = this.host
     this.host.session.publish({
       ...fields,
-      selection: { anchor: this.anchor, focus: this.focus, mode: this.mode },
+      ...(sheet.sheetId !== MAIN_SHEET_ID ? { sheetId: sheet.sheetId } : {}),
+      selection: { anchor: this.canonical(this.anchor), focus: this.canonical(this.focus), mode: this.mode },
     })
+  }
+
+  private canonical<T extends CellPosition>(position?: T) {
+    if (!position) return undefined
+    const coordinates = this.host.sheet.coordinates
+    const row = coordinates.canonicalRow(position.row)
+    if (row === undefined) return undefined
+    const stable = coordinates.hasRowOrder || coordinates.edits.row.length || coordinates.edits.column.length
+    return stable ? { ...position, row, rowId: coordinates.axisId('row', position.row), columnId: coordinates.axisId('column', position.column) }
+      : { ...position, row }
   }
 
   getSelectionBounds() {
@@ -78,7 +91,9 @@ export class TableSelection {
 
   sendAwareness(cursor: CellPosition & { offset?: number }) {
     this.pendingCursor = undefined
-    this.updateAwareness({ cursor, editing: this.host.editingKey() ?? null })
+    const editing = this.host.editingKey()
+    const editingId = editing && this.host.sheet.coordinates.cellId(editing)
+    this.updateAwareness({ cursor: this.canonical(cursor), editing: editingId ? this.host.sheet.canonicalKey(editingId) ?? null : null })
   }
 
 }

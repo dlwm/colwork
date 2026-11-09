@@ -1,4 +1,4 @@
-import type * as Y from 'yjs'
+import type { ProjectedMap } from './sheetCoordinates'
 import { containsPosition, type CellPosition } from './range'
 import { selectionRange } from './selection'
 type DialogHost = {
@@ -8,7 +8,7 @@ type DialogHost = {
   selectionAnchor(): CellPosition | undefined
   restoreSelection(anchor: CellPosition | undefined, focus: CellPosition): void
   root(): HTMLElement
-  locks: Y.Map<string>
+  locks: Pick<ProjectedMap<string>, 'entries'>
   hideMenu(): void
   setSelectionLocked(locked: boolean, password?: string): Promise<void>
 }

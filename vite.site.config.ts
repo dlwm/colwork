@@ -9,6 +9,6 @@ export default defineConfig({
   define: { __COLWORK_CLOUDFLARE__: true },
   build: {
     outDir: 'site-dist',
-    rollupOptions: { input: ['index.html', 'test/vue.html', 'test/react.html', 'test/index.html'] },
+    rollupOptions: { input: ['index.html', 'test/vue.html', 'test/react.html', 'test/index.html', 'test/document.html', 'test/workbook.html'] },
   },
 })

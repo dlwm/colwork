@@ -4,8 +4,9 @@ import { ColworkTable } from '@colwork-demo'
 import '@colwork-demo/style'
 import { classifyLog, formatLog, loadLogTypes, logTypes, saveLogTypes, type LogEntry, type LogType } from '../log'
 import { splitHexGroups, splitLogText } from '../identifiers'
-import { downloadJson } from '../archive'
-import { loadUserSettings, saveUserSettings, websocketUrl, collaborationTransport, cloudflareDeployment, type UserSettings } from '../user-settings'
+import { downloadTableArchive } from '../archive'
+import { demoImages } from '../demo-images'
+import { loadUserSettings, saveUserSettings, websocketUrl, collaborationTransport, cloudflareDeployment, demoAllowsExport, demoViewPolicy, type UserSettings } from '../user-settings'
 import '../test.css'
 
 const transport = collaborationTransport()
@@ -36,7 +37,7 @@ function App() {
     let table: ColworkTable | undefined
     saveUserSettings(applied, 'react').catch(() => undefined).finally(() => {
        if (active && tableRoot.current) {
-         table = new ColworkTable(tableRoot.current, { room: 'colwork-demo', user: applied.nickname, userColor: applied.color, transport, initializeAfterSync: cloudflareDeployment, websocketUrl: websocketUrl(applied), onLog: appendLog })
+         table = new ColworkTable(tableRoot.current, { room: 'colwork-demo', user: applied.nickname, userColor: applied.color, transport, initializeAfterSync: cloudflareDeployment, websocketUrl: websocketUrl(applied), onLog: appendLog, viewPolicy: demoViewPolicy(applied.nickname), images: demoImages })
          tableRef.current = table
        }
     })
@@ -76,7 +77,15 @@ function App() {
     return <span className="json-value">{JSON.stringify(value)}</span>
   }
   return <main className="test-shell"><section className="panel">
-      <div className="user-settings"><input value={draft.nickname} placeholder="昵称" onChange={(event) => setDraft({ ...draft, nickname: event.target.value })} /><span className="user-settings__delay"><input value={draft.delay} type="number" min="0" max="30000" placeholder="延时" onChange={(event) => setDraft({ ...draft, delay: Number(event.target.value) })} /><span className="user-settings__unit">ms</span></span><input value={draft.color} type="color" onChange={(event) => setDraft({ ...draft, color: event.target.value })} /><button type="button" onClick={applySettings}>应用</button><button type="button" onClick={() => tableRef.current && downloadJson('colwork.snapshot.json', tableRef.current.getYjsSnapshot())}>导出快照</button><button type="button" onClick={() => tableRef.current && downloadJson('colwork.update-log.json', tableRef.current.getYjsUpdateLog())}>导出更新日志</button><a className="user-settings__tool-link" href="/test/index.html">快照工具</a></div>
+      <div className="user-settings">
+        <input value={draft.nickname} placeholder="昵称" onChange={(event) => setDraft({ ...draft, nickname: event.target.value })} />
+        <span className="user-settings__delay"><input value={draft.delay} type="number" min="0" max="30000" placeholder="延时" onChange={(event) => setDraft({ ...draft, delay: Number(event.target.value) })} /><span className="user-settings__unit">ms</span></span>
+        <input value={draft.color} type="color" onChange={(event) => setDraft({ ...draft, color: event.target.value })} />
+        <button type="button" onClick={applySettings}>应用</button>
+        <button type="button" disabled={!demoAllowsExport} onClick={() => downloadTableArchive(tableRef.current, 'snapshot')}>导出快照</button>
+        <button type="button" disabled={!demoAllowsExport} onClick={() => downloadTableArchive(tableRef.current, 'update-log')}>导出更新日志</button>
+        <a className="user-settings__tool-link" href="/test/index.html">快照工具</a>
+      </div>
     <div ref={tableRoot} />
     <div className="log-toolbar"><div className="log-filters"><button className={`log-playback ${recording ? 'is-recording' : ''}`} type="button" aria-label={recording ? '暂停日志记录' : '继续日志记录'} onClick={() => { recordingRef.current = !recordingRef.current; setRecording(recordingRef.current) }}>{recording ? 'Ⅱ' : '▶'}</button>{logTypes.map((type) => <button className={`log-filter log-filter-${type} ${activeTypes.has(type) ? 'active' : ''}`} type="button" onClick={() => toggleType(type)} key={type}>{type}</button>)}</div><button className="log-clear" type="button" aria-label="清空日志" onClick={() => { setLogs([]); stickToBottom.current = true }}>×</button></div>
     <div ref={logRoot} className="log-window" role="log" onScroll={() => { if (logRoot.current) stickToBottom.current = logRoot.current.scrollHeight - logRoot.current.scrollTop - logRoot.current.clientHeight < 8 }}>{logs.filter((log) => activeTypes.has(log.type)).map((log, index) => { const formatted = formatLog(log.text); return <div className={`log-entry log-${log.type}`} key={`${log.text}-${index}`}><span className="log-kind">{log.type}</span>{formatted.json ? <details className="log-json-block"><summary>{textNodes(formatted.prefix)}</summary>{jsonNode(formatted.value)}</details> : <div className="log-body">{textNodes(formatted.prefix)}</div>}</div> })}</div>

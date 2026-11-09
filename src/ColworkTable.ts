@@ -5,7 +5,7 @@ import { PointerInteraction } from './pointerInteraction'
 import { TableSelection } from './tableSelection'
 import { TableClipboard } from './clipboard'
 import { DocumentArchive } from './documentArchive'
-import type { ColworkTableOptions } from './options'
+import type { ColworkRowView, ColworkTableOptions, ColworkViewPolicy } from './options'
 export type { ColworkTableOptions } from './options'
 import { CollaborationSession } from './collaboration'
 import { TableDialogs } from './dialogs'
@@ -17,6 +17,12 @@ import { ContextMenu } from './context-menu'
 import { buildToolbar } from './toolbar'
 import { renderTable } from './renderTable'
 import { CellFormatting } from './formatting'
+import { TableWatermark } from './tableWatermark'
+import type { ProjectedMap, SheetCoordinates } from './sheetCoordinates'
+import { parseCellKey } from './model-schema'
+import { openRowViewDialog } from './rowViewDialog'
+import { encodeCellImage, readCellImage } from './cellImage'
+import { renderCellContent } from './cellContent'
 import { createPasswordLock, verifyPasswordLock } from './passwordLock'
 import * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
@@ -31,11 +37,16 @@ export class ColworkTable {
   private readonly session: CollaborationSession
   private readonly doc: Y.Doc
   private readonly sheet: SheetDocument
-  private readonly cells: Y.Map<string>
-  private readonly styles: Y.Map<string>
-  private readonly rowHeights: Y.Map<number>
-  private readonly columnWidths: Y.Map<number>
-  private readonly locks: Y.Map<string>
+  private axes: SheetCoordinates['axes']
+  private rowView: ColworkRowView = {}
+  private rowViewDialog?: HTMLDialogElement
+  private readonly imageUploads = new Map<string, symbol>()
+  private imagePicker?: HTMLInputElement
+  private readonly cells: ProjectedMap<string>
+  private readonly styles: ProjectedMap<string>
+  private readonly rowHeights: ProjectedMap<number>
+  private readonly columnWidths: ProjectedMap<number>
+  private readonly locks: ProjectedMap<string>
   private readonly pointer: PointerInteraction
   private readonly clipboard: TableClipboard
   private readonly selection: TableSelection
@@ -45,7 +56,7 @@ export class ColworkTable {
   private editEpoch = 0
   private frozenRows = 0
   private frozenColumns = 0
-  private readonly merges: Y.Map<string>
+  private readonly merges: ProjectedMap<string>
   private readonly undoManager: Y.UndoManager
   private readonly provider?: WebrtcProvider | WebsocketProvider
   private readonly awareness: Awareness
@@ -65,12 +76,95 @@ export class ColworkTable {
   private showGridLines = true
   private bandedRows = false
   private readOnly: boolean
+  #allowExport = true
+  readonly #watermark: TableWatermark
   private readonly archive: DocumentArchive
   private resizing?: { axis: 'row' | 'column'; index: number; start: number; size: number; currentSize: number }
-  private readonly onCellsChange = () => { if (this.expandLogicalSizeFromDocument()) this.render(); else this.refreshValues() }
+  private readonly onCellsChange = () => {
+    if (this.axes !== this.sheet.coordinates.axes) return
+    if (this.sheet.coordinates.hasRowOrder) { this.refreshRowOrder(); this.render() }
+    else if (this.expandLogicalSizeFromDocument()) this.render()
+    else this.refreshValues()
+  }
   private readonly onStylesChange = () => { if (this.expandLogicalSizeFromDocument()) this.render(); else this.refreshStyles() }
+  private readonly onFormulaDependencies = (transaction: Y.Transaction) => {
+    const changed = new Set<unknown>(transaction.changed.keys())
+    if (!changed.size || changed.has(this.cells.raw)) return
+    if ([...this.doc.share].some(([name, type]) => changed.has(type) &&
+      (name === 'colwork-workbook' || name.startsWith('colwork-sheet:') || name === 'cells' || name.endsWith('-edits')))) {
+      if (this.sheet.coordinates.hasRowOrder) { this.refreshRowOrder(); this.render() }
+      else this.refreshValues()
+    }
+  }
   private readonly onSizesChange = () => this.render()
-  private readonly onMergesChange = () => this.render()
+  private readonly onMergesChange = () => {
+    if (this.axes !== this.sheet.coordinates.axes) return
+    if (this.sheet.coordinates.hasRowOrder) this.refreshRowOrder()
+    this.render()
+  }
+  private readonly onAxesChange = () => {
+    const coordinates = this.sheet.coordinates
+    const previous = this.axes
+    const next = coordinates.axes
+    if (previous === next) return
+    const selection = this.selection
+    const selectedPosition = selection.selectedKey ? parseCellKey(selection.selectedKey) : undefined
+    const priorRows = new Map([selection.anchor, selection.focus, selectedPosition].flatMap(position =>
+      position ? [[position.row, coordinates.canonicalRow(position.row)] as const] : []))
+    const wasOrdered = coordinates.hasRowOrder
+    this.axes = next
+    if (wasOrdered) {
+      const columnOf = (column: number) => next.column.positionOf(previous.column.idAt(column))
+      const sort = this.rowView.sort
+      const column = sort && columnOf(sort.column)
+      this.rowView = {
+        headerRows: this.rowView.headerRows,
+        sort: sort && column !== undefined ? { ...sort, column } : undefined,
+        filters: this.rowView.filters?.flatMap(filter => {
+          const mapped = columnOf(filter.column)
+          return mapped === undefined ? [] : [{ ...filter, column: mapped }]
+        }),
+      }
+      try { this.sheet.applyRowView(this.rowView) } catch { this.rowView = {}; this.sheet.applyRowView({}) }
+    }
+    this.dimensions.rows = Math.max(1, this.dimensions.rows + next.row.delta - previous.row.delta)
+    this.dimensions.columns = Math.max(1, this.dimensions.columns + next.column.delta - previous.column.delta)
+    this.expandLogicalSizeFromDocument()
+    const remap = (position: CellPosition | undefined) => {
+      if (!position) return undefined
+      const priorRow = priorRows.get(position.row)
+      const canonical = priorRow === undefined ? undefined : next.row.positionOf(previous.row.idAt(priorRow))
+      const row = canonical === undefined ? undefined : coordinates.visualRow(canonical)
+      if (row === undefined && wasOrdered) return undefined
+      return {
+        row: row ?? Math.min(position.row, this.rowCount - 1),
+        column: next.column.positionOf(previous.column.idAt(position.column)) ?? Math.min(position.column, this.columnCount - 1),
+      }
+    }
+    const selected = remap(selectedPosition)
+    selection.anchor = remap(selection.anchor)
+    selection.focus = remap(selection.focus)
+    selection.selectedKey = selected && cellKey(selected)
+    if (selection.anchor && selection.focus) {
+      if (selection.mode === 'row' || selection.mode === 'all') {
+        selection.anchor.column = 0
+        selection.focus.column = this.columnCount - 1
+      }
+      if (selection.mode === 'column' || selection.mode === 'all') {
+        selection.anchor.row = 0
+        selection.focus.row = this.rowCount - 1
+      }
+    }
+    this.editEpoch++
+    this.resizing = undefined
+    this.viewport.classList.remove('is-resizing')
+    this.pointer.cancel()
+    this.menu.hide()
+    this.dialogs.close()
+    this.render()
+    if (selection.focus) selection.sendAwareness(selection.focus)
+    else if (wasOrdered) selection.updateAwareness({ cursor: undefined, editing: null })
+  }
   private readonly onLocksChange = () => {
     // Old history must not restore content underneath a newly received lock.
     this.undoManager.clear()
@@ -164,7 +258,10 @@ export class ColworkTable {
     this.doc = this.session.document
     this.awareness = this.session.awareness
     this.provider = this.session.provider
-    this.sheet = new SheetDocument(this.doc, this)
+    this.sheet = new SheetDocument(this.doc, this, options.sheetId)
+    this.axes = this.sheet.coordinates.axes
+    this.dimensions.rows = Math.max(1, this.dimensions.rows + this.axes.row.delta)
+    this.dimensions.columns = Math.max(1, this.dimensions.columns + this.axes.column.delta)
     this.cells = this.sheet.cells
     this.styles = this.sheet.styles
     this.rowHeights = this.sheet.rowHeights
@@ -175,8 +272,9 @@ export class ColworkTable {
       sheet: this.sheet, session: this.session, dimensions: () => ({ rows: this.rowCount, columns: this.columnCount }),
       editingKey: () => this.editing?.key, refresh: () => this.refreshSelection(),
     })
-    this.formatting = new CellFormatting(this.doc, this.cells, this.styles, {
+    this.formatting = new CellFormatting(this.doc, this.styles, {
       origin: this, zoom: () => this.zoomRatio, canEdit: () => !this.readOnly && !this.destroyed && !this.selectionHasLocks(),
+      readValue: key => this.sheet.displayCell(key),
       selectedKey: () => this.selection.selectedKey, bounds: () => this.selection.getSelectionBounds(), render: () => this.render(),
     })
     this.dialogs = new TableDialogs({
@@ -207,9 +305,10 @@ export class ColworkTable {
     document.addEventListener('mousedown', this.onDocumentMouseDown)
     this.table = document.createElement('table')
     this.editing = new CellEditor({
+      id: key => this.sheet.coordinates.cellId(key), position: id => this.sheet.coordinates.cellKey(id),
       table: this.table, canEdit: key => !this.readOnly && !this.destroyed && !this.sheet.isCellLocked(key),
-      read: key => this.cells.get(key), write: (key, value) => this.doc.transact(() => this.cells.set(key, value), this),
-      applyStyle: (element, key) => this.formatting.applyStyle(element, key), displayValue: key => this.formatting.displayValue(key),
+      read: key => this.sheet.readCell(key), write: (key, value) => this.doc.transact(() => this.sheet.writeCell(key, value), this),
+      applyStyle: (element, key) => this.formatting.applyStyle(element, key), renderContent: this.renderContent,
       announce: cursor => this.selection.sendAwareness(cursor), focus: () => this.selection.focus,
       clearEditingPresence: () => { if (!this.destroyed) this.session.finishEditing() },
       changed: state => this.options.onEditingChange?.(state),
@@ -218,6 +317,7 @@ export class ColworkTable {
     this.clipboard = new TableClipboard({
       sheet: this.sheet, selection: this.selection, editing: this.editing, formatting: this.formatting,
       canEdit: () => !this.readOnly && !this.destroyed, dimensions: () => ({ rows: this.rowCount, columns: this.columnCount }),
+      pasteImage: options.images?.upload ? file => this.uploadFromView(file) : undefined,
       render: () => this.render(), origin: this,
     })
     this.pointer = new PointerInteraction({
@@ -247,6 +347,8 @@ export class ColworkTable {
       hideContextMenu: () => this.menu.hide(), showContextMenu: (x, y, groups) => this.menu.show(x, y, groups),
       protectionActions: () => this.pointer.protectionActions(), freezeSelection: axis => this.freezeSelection(axis),
       setFrozenPanes: (rows, columns) => this.setFrozenPanes(rows, columns), render: () => this.render(),
+      openRowView: () => this.openRowView(),
+      chooseImage: options.images?.upload ? () => this.chooseImage() : undefined,
       setStyle: (format, value) => this.formatting.setStyle(format, value), toggleFormat: format => this.formatting.toggleFormat(format),
       clearFormatting: () => this.formatting.clearFormatting(), toggleBorder: mode => this.formatting.toggleBorder(mode),
     })
@@ -256,24 +358,30 @@ export class ColworkTable {
     this.protectionMenuButton = toolbar.protectionButton
     shell.append(this.toolbar, this.viewport, this.frozenBoundaryLayer)
     root.replaceChildren(shell)
+    this.#watermark = new TableWatermark(shell)
+    this.#applyViewPolicy(options.viewPolicy ?? {})
 
     const shouldSeed = !this.session.external && !this.readOnly && !options.snapshot && !options.updates?.length
     const shouldSeedDemo = shouldSeed && this.cells.size === 0 && this.locks.size === 0
     if (shouldSeed && !options.initializeAfterSync) this.sheet.seed(options.rows ?? defaultRows)
     if (shouldSeedDemo && !options.initializeAfterSync) seedDemoFormatting(this.sheet)
     this.expandLogicalSizeFromDocument()
-    this.undoManager = new Y.UndoManager([this.cells, this.styles, this.rowHeights, this.columnWidths, this.merges], { captureTimeout: 500, trackedOrigins: this.session.external ? new Set([this]) : new Set([null, this]) })
+    const { row, column } = this.sheet.coordinates.edits
+    this.undoManager = new Y.UndoManager([this.cells.raw, this.styles.raw, this.rowHeights.raw, this.columnWidths.raw, this.merges.raw, row, column], { captureTimeout: 500, trackedOrigins: this.session.external ? new Set([this]) : new Set([null, this]) })
     this.undoManager.on('stack-item-added', this.onHistoryChange)
     this.undoManager.on('stack-item-popped', this.onHistoryChange)
     this.undoManager.on('stack-cleared', this.onHistoryChange)
     this.render()
     this.refreshHistoryButtons()
-    this.cells.observe(this.onCellsChange)
-    this.styles.observe(this.onStylesChange)
-    this.rowHeights.observe(this.onSizesChange)
-    this.columnWidths.observe(this.onSizesChange)
-    this.merges.observe(this.onMergesChange)
-    this.locks.observe(this.onLocksChange)
+    this.cells.raw.observe(this.onCellsChange)
+    this.doc.on('afterTransaction', this.onFormulaDependencies)
+    this.styles.raw.observe(this.onStylesChange)
+    this.rowHeights.raw.observe(this.onSizesChange)
+    this.columnWidths.raw.observe(this.onSizesChange)
+    this.merges.raw.observe(this.onMergesChange)
+    this.locks.raw.observe(this.onLocksChange)
+    row.observe(this.onAxesChange)
+    column.observe(this.onAxesChange)
     this.viewportResizeObserver = new ResizeObserver(() => refreshFrozenBoundaries(this.frozenBoundaryLayer, this.viewport, this.frozenRows, this.frozenColumns, this.rowHeaderWidth, this.columnHeaderHeight, (axis, index) => axis === 'row' ? this.getRowHeight(index) : this.getColumnWidth(index)))
     this.viewportResizeObserver.observe(this.viewport)
     bindBuiltInSynchronization(this.session, options, this.sheet, shouldSeed, {
@@ -326,9 +434,139 @@ export class ColworkTable {
   /** Discards an active draft while preserving the current shared document value. */
   cancelEditing() { if (!this.destroyed) this.editing.finish(false) }
 
-  getYjsSnapshot() { return this.archive.snapshot() }
+  /** Replaces the entire local view policy. Omitted fields use their defaults. */
+  setViewPolicy(policy: ColworkViewPolicy) {
+    if (!this.destroyed) this.#applyViewPolicy(policy)
+  }
 
-  getYjsUpdateLog() { return this.archive.updateLog() }
+  #applyViewPolicy(policy: ColworkViewPolicy) {
+    this.#allowExport = policy.allowExport === undefined || policy.allowExport === true
+    this.#watermark.setText(policy.watermark)
+  }
+
+  canExport() { return this.#allowExport }
+
+  /** Uploads through the host, then writes its resource reference into the selected cell. */
+  async insertImage(file: File, position = this.selectedImagePosition()) {
+    const upload = this.options.images?.upload
+    if (!upload) throw new Error('请先配置图片上传接口')
+    if (this.readOnly || this.destroyed) return false
+    if (!position || !Number.isSafeInteger(position.row) || !Number.isSafeInteger(position.column)
+      || position.row < 0 || position.column < 0 || position.row >= this.rowCount || position.column >= this.columnCount) {
+      throw new RangeError('请先选中要插入图片的单元格')
+    }
+    if (!file.size || (file.type && !/^image\/(png|jpeg|gif|webp)$/i.test(file.type))) throw new TypeError('请选择 PNG、JPEG、GIF 或 WebP 图片')
+    const merge = this.sheet.getMergeRanges().find(range => containsPosition(range, position))
+    const key = cellKey(merge?.start ?? position)
+    const id = this.sheet.coordinates.cellId(key)
+    if (!id || this.sheet.isCellLocked(key)) return false
+    this.commitEditing()
+    const original = this.cells.raw.get(id)
+    const request = Symbol()
+    this.imageUploads.set(id, request)
+    try {
+      const value = encodeCellImage(await upload(file))
+      const current = this.sheet.coordinates.cellKey(id)
+      if (this.imageUploads.get(id) !== request || !current || this.readOnly || this.destroyed
+        || this.sheet.isCellLocked(current) || this.cells.raw.get(id) !== original) return false
+      this.undoManager.stopCapturing()
+      this.doc.transact(() => this.cells.raw.set(id, value), this)
+      this.undoManager.stopCapturing()
+      return true
+    } finally {
+      if (this.imageUploads.get(id) === request) this.imageUploads.delete(id)
+    }
+  }
+
+  private selectedImagePosition() {
+    return this.selection.selectedKey ? parseCellKey(this.selection.selectedKey) : this.selection.focus
+  }
+
+  private chooseImage() {
+    if (!this.selectedImagePosition()) {
+      this.dialogs.showLockMessage('请先选中要插入图片的单元格')
+      return
+    }
+    if (!this.imagePicker) {
+      const input = this.root.ownerDocument.createElement('input')
+      input.type = 'file'
+      input.accept = 'image/png,image/jpeg,image/gif,image/webp'
+      input.hidden = true
+      input.setAttribute('aria-label', '选择图片')
+      input.addEventListener('change', () => {
+        const file = input.files?.[0]
+        input.value = ''
+        if (file) this.uploadFromView(file)
+      })
+      this.root.append(input)
+      this.imagePicker = input
+    }
+    this.imagePicker.click()
+  }
+
+  private uploadFromView(file: File) {
+    void this.insertImage(file).then(inserted => {
+      if (!inserted && !this.destroyed) this.dialogs.showLockMessage('当前单元格不可编辑或已变化，未插入图片')
+    }, error => {
+      if (!this.destroyed) this.dialogs.showLockMessage(error instanceof Error ? error.message : '图片上传失败')
+    })
+  }
+
+  private readonly renderContent = (element: HTMLElement, key: string) => {
+    const image = readCellImage(this.cells.get(key))
+    renderCellContent(element, this.formatting.displayValue(key), image, this.options.images?.resolveUrl)
+  }
+
+  getRowView(): ColworkRowView { return structuredClone(this.rowView) }
+
+  setRowView(view: ColworkRowView) {
+    if (this.destroyed) return
+    const filters = (view.filters ?? []).filter(filter => filter.contains.trim()).map(filter => ({ ...filter }))
+    const columns = [...filters.map(filter => filter.column), ...(view.sort ? [view.sort.column] : [])]
+    if (columns.some(column => !Number.isSafeInteger(column) || column < 0 || column >= this.columnCount)
+      || (view.headerRows !== undefined && (!Number.isSafeInteger(view.headerRows) || view.headerRows < 0))
+      || (view.sort && !['asc', 'desc'].includes(view.sort.direction))) throw new RangeError('排序或筛选条件无效')
+    this.commitEditing()
+    const next = { sort: view.sort && { ...view.sort }, filters, headerRows: view.headerRows }
+    try { this.sheet.applyRowView(next) } catch (error) { this.sheet.applyRowView(this.rowView); throw error }
+    this.rowView = next
+    this.selection.anchor = this.selection.focus = undefined
+    this.selection.selectedKey = this.selection.pendingCursor = undefined
+    this.selection.updateAwareness({ cursor: undefined, editing: null })
+    this.pointer.cancel()
+    this.viewport.scrollTop = 0
+    this.render()
+  }
+
+  openRowView() {
+    if (this.destroyed || this.rowViewDialog?.open) return
+    this.rowViewDialog = openRowViewDialog(this.root, this.getRowView(), this.selection.focus?.column ?? 0, this.columnCount,
+      view => this.setRowView(view))
+  }
+
+  private refreshRowOrder() {
+    const coordinates = this.sheet.coordinates
+    const focus = this.selection.focus && coordinates.cellId(cellKey(this.selection.focus))
+    const anchor = this.selection.anchor && coordinates.cellId(cellKey(this.selection.anchor))
+    try { this.sheet.applyRowView(this.rowView) } catch { this.rowView = {}; this.sheet.applyRowView({}) }
+    this.selection.focus = focus ? coordinates.cellPosition(focus) : undefined
+    this.selection.anchor = anchor ? coordinates.cellPosition(anchor) : this.selection.focus
+    this.selection.selectedKey = this.selection.focus && cellKey(this.selection.focus)
+  }
+
+  #assertExportAllowed() {
+    if (!this.#allowExport) throw new DOMException('Export is disabled by the view policy', 'NotAllowedError')
+  }
+
+  getYjsSnapshot() {
+    this.#assertExportAllowed()
+    return this.archive.snapshot()
+  }
+
+  getYjsUpdateLog() {
+    this.#assertExportAllowed()
+    return this.archive.updateLog()
+  }
   /** Freeze a leading prefix in this local view. */
   setFrozenPanes(rows: number, columns: number) {
     if (this.destroyed) return false
@@ -405,7 +643,7 @@ export class ColworkTable {
     }, this)
   }
 
-  private get rowCount() { return this.dimensions.rows }
+  private get rowCount() { return this.sheet.coordinates.visibleRowCount(this.dimensions.rows) }
   private get columnCount() { return this.dimensions.columns }
   private get rowHeaderWidth() { return ROW_HEADER_WIDTH * this.zoomRatio }
   private get columnHeaderHeight() { return COLUMN_HEADER_HEIGHT * this.zoomRatio }
@@ -447,6 +685,7 @@ export class ColworkTable {
   private mergeSelection() {
     if (this.readOnly || this.selectionHasLocks()) return
     const range = selectionRange(this.selection.anchor, this.selection.focus)
+    if (this.sheet.coordinates.hasRowOrder && range.start.row !== range.end.row) return
     if (range.start.row === range.end.row && range.start.column === range.end.column) return
     if (this.crossesFrozenBoundary(range)) {
       this.dialogs.showLockMessage('合并范围同时包含固定和非固定区域，无法合并，请调整选区或取消固定')
@@ -470,11 +709,15 @@ export class ColworkTable {
   }
 
   private modifyAxis(axis: 'row' | 'column', index: number, amount: number, removeCount = 0) {
+    if (this.sheet.coordinates.hasRowOrder) {
+      this.dialogs.showLockMessage('请先清除个人排序筛选，再增删行列')
+      return
+    }
     if (this.readOnly || amount === 0 || this.sheet.isAxisLocked(axis, index, true)) return
+    this.editing.finish(true)
+    this.undoManager.stopCapturing()
     this.sheet.modifyAxis(axis, index, amount, removeCount)
-    if (axis === 'row') this.dimensions.rows = Math.max(1, this.dimensions.rows + amount)
-    else this.dimensions.columns = Math.max(1, this.dimensions.columns + amount)
-    this.render()
+    this.undoManager.stopCapturing()
   }
 
   private deleteRows() {
@@ -489,9 +732,9 @@ export class ColworkTable {
     this.modifyAxis('column', range.start.column, -count, count)
   }
 
-  private expandLogicalSpace() { return this.dimensions.expandViewport(this.viewport, this.selection) }
+  private expandLogicalSpace() { if (!this.sheet.coordinates.hasRowOrder) this.dimensions.expandViewport(this.viewport, this.selection) }
 
-  private expandForRemoteSelections() { return this.dimensions.expandRemote(this.awareness) }
+  private expandForRemoteSelections() { return this.dimensions.expandRemote(this.awareness, this.sheet.sheetId) }
 
   private clearSelectionContents() {
     if (this.readOnly || this.selectionHasLocks()) return
@@ -524,8 +767,9 @@ export class ColworkTable {
       rowHeaderWidth: this.rowHeaderWidth, columnHeaderHeight: this.columnHeaderHeight,
       bandedRows: this.bandedRows, showGridLines: this.showGridLines, readOnly: this.readOnly,
       getRowHeight: row => this.getRowHeight(row), getColumnWidth: column => this.getColumnWidth(column),
+      rowLabel: row => { const index = this.sheet.coordinates.canonicalRow(row); return index === undefined ? '' : String(index + 1) },
       getMergeRanges: () => this.sheet.getMergeRanges(), isCellLocked: (key, merge) => this.sheet.isCellLocked(key, merge),
-      isCellPasswordLocked: (key, merge) => this.sheet.isCellPasswordLocked(key, merge), displayValue: key => this.formatting.displayValue(key),
+      isCellPasswordLocked: (key, merge) => this.sheet.isCellPasswordLocked(key, merge), renderContent: this.renderContent,
       applyStyle: (element, key) => this.formatting.applyStyle(element, key),
       addResizeHandle: (element, axis, index) => this.addResizeHandle(element, axis, index),
       addHeaderSelection: (element, axis, index) => this.pointer.addHeaderSelection(element, axis, index),
@@ -543,7 +787,7 @@ export class ColworkTable {
   private refreshStyles() { refreshStyles(this.refreshView()) }
   private refreshView() {
     return { table: this.table, viewport: this.viewport, editingKey: this.editing?.key, formatting: this.formatting,
-      selection: this.selection, awareness: this.awareness, userColor: this.options.userColor,
+      selection: this.selection, awareness: this.awareness, sheet: this.sheet, userColor: this.options.userColor, renderContent: this.renderContent,
       rowCount: this.rowCount, columnCount: this.columnCount,
       size: (axis: 'row' | 'column', index: number) => axis === 'row' ? this.getRowHeight(index) : this.getColumnWidth(index) }
   }
@@ -552,17 +796,23 @@ export class ColworkTable {
     if (this.destroyed) return
     if (!this.session.external) this.editing.finish(true)
     this.destroyed = true
+    this.imageUploads.clear()
+    this.#watermark.destroy()
+    this.rowViewDialog?.remove()
     this.viewportResizeObserver.disconnect()
     this.dialogs.close()
     this.editing.finish(false)
     this.archive.destroy()
     this.awareness.off('change', this.onAwarenessChange)
-    this.cells.unobserve(this.onCellsChange)
-    this.styles.unobserve(this.onStylesChange)
-    this.rowHeights.unobserve(this.onSizesChange)
-    this.columnWidths.unobserve(this.onSizesChange)
-    this.merges.unobserve(this.onMergesChange)
-    this.locks.unobserve(this.onLocksChange)
+    this.cells.raw.unobserve(this.onCellsChange)
+    this.doc.off('afterTransaction', this.onFormulaDependencies)
+    this.styles.raw.unobserve(this.onStylesChange)
+    this.rowHeights.raw.unobserve(this.onSizesChange)
+    this.columnWidths.raw.unobserve(this.onSizesChange)
+    this.merges.raw.unobserve(this.onMergesChange)
+    this.locks.raw.unobserve(this.onLocksChange)
+    this.sheet.coordinates.edits.row.unobserve(this.onAxesChange)
+    this.sheet.coordinates.edits.column.unobserve(this.onAxesChange)
     this.undoManager.off('stack-item-added', this.onHistoryChange)
     this.undoManager.off('stack-item-popped', this.onHistoryChange)
     this.undoManager.off('stack-cleared', this.onHistoryChange)

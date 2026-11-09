@@ -1,15 +1,28 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 import { createServer } from 'node:net'
+import { createHmac } from 'node:crypto'
 import * as Y from 'yjs'
 import { WebsocketProvider } from 'y-websocket'
+import { createDecoder, readVarUint } from 'lib0/decoding'
 import WebSocket from 'ws'
 import { chromium } from '@playwright/test'
 import { verifyDeployment } from '../../script/deploy-cloudflare.mjs'
+import { syncRequest, syncUpdate } from '../../server/cloudflare/protocol.mjs'
+import ExcelJS from 'exceljs'
+
+const testSessionSecret = 'colwork-local-integration-session-key'
+function sessionToken(documents, options = {}) {
+  const claims = Buffer.from(JSON.stringify({
+    aud: 'colwork', sub: 'account-42', name: '真实登录用户', exp: Math.floor(Date.now() / 1000) + 300, documents, ...options,
+  })).toString('base64url')
+  const payload = `v1.${claims}`
+  return `${payload}.${createHmac('sha256', testSessionSecret).update(payload).digest('base64url')}`
+}
 
 async function until(predicate, timeout = 20000) {
   const deadline = Date.now() + timeout
@@ -26,6 +39,11 @@ test('Cloudflare runtime: HTTP, Yjs, presence, room isolation, browser and resta
   const port = server.address().port
   await new Promise(resolve => server.close(resolve))
   const storage = await mkdtemp(resolve(tmpdir(), 'colwork-cloudflare-test-'))
+  const backendConfigPath = resolve(storage, 'backend.test.json')
+  const backendConfig = JSON.parse(await readFile('config/cloudflare/wrangler.backend.json', 'utf8'))
+  await writeFile(backendConfigPath, JSON.stringify({
+    ...backendConfig, main: resolve('server/cloudflare/backend.mjs'), vars: { COLWORK_SESSION_SECRET: testSessionSecret },
+  }))
   const base = `http://127.0.0.1:${port}`
   let process, output = '', browser
   const clients = []
@@ -37,7 +55,7 @@ test('Cloudflare runtime: HTTP, Yjs, presence, room isolation, browser and resta
   }
   async function start() {
     output = ''
-    process = spawn(globalThis.process.execPath, ['node_modules/wrangler/bin/wrangler.js', 'dev', '--config', 'config/cloudflare/wrangler.frontend.json', '--config', 'config/cloudflare/wrangler.backend.json', '--ip', '127.0.0.1', '--port', String(port), '--persist-to', storage], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...globalThis.process.env, WRANGLER_SEND_METRICS: 'false' } })
+    process = spawn(globalThis.process.execPath, ['node_modules/wrangler/bin/wrangler.js', 'dev', '--config', 'config/cloudflare/wrangler.frontend.json', '--config', backendConfigPath, '--ip', '127.0.0.1', '--port', String(port), '--persist-to', storage], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...globalThis.process.env, WRANGLER_SEND_METRICS: 'false' } })
     process.stdout.on('data', chunk => { output += chunk })
     process.stderr.on('data', chunk => { output += chunk })
     await until(async () => {
@@ -153,5 +171,111 @@ test('Cloudflare runtime: HTTP, Yjs, presence, room isolation, browser and resta
     const demo = await connect('colwork-demo')
     assert.equal(demo.doc.getMap('cells').size, 0)
     assert.equal(demo.doc.getMap('colwork-metadata').get('initialized'), true)
+  })
+  await t.test('protected documents verify login, isolate rooms, and enforce export and write access', async () => {
+    const room = 'staff-sheet'
+    const grant = { id: room, canEdit: true, allowExport: true, viewerWatermark: true, fixedWatermark: '内部文件' }
+    const editorToken = sessionToken([grant])
+    const viewerToken = sessionToken([{ ...grant, canEdit: false, allowExport: false }], { name: '只读用户' })
+    const cookie = token => `colwork_session=${token}`
+    const request = (action, token) => fetch(`${base}/api/documents/${room}/${action}`, {
+      headers: token ? { Cookie: cookie(token), 'x-colwork-can-edit': 'true' } : {},
+    })
+    assert.equal((await request('view-policy')).status, 401)
+    assert.equal((await request('export', `${editorToken.slice(0, -43)}${'a'.repeat(43)}`)).status, 401)
+    assert.equal((await request('view-policy', sessionToken([grant], { exp: 1 }))).status, 401)
+    assert.equal((await request('export', sessionToken([{ ...grant, id: 'other' }]))).status, 403)
+    const viewerPolicy = await request('view-policy?allowExport=1&name=forged', viewerToken)
+    assert.equal(viewerPolicy.headers.get('cache-control'), 'private, no-store')
+    assert.deepEqual(await viewerPolicy.json(), {
+      displayName: '只读用户', canEdit: false,
+      viewPolicy: { allowExport: false, watermark: { viewerText: '只读用户', fixedText: '内部文件' } },
+    })
+    assert.equal((await request('export?allowExport=1', viewerToken)).status, 403)
+    const rejectedSocket = headers => new Promise((resolve, reject) => {
+      const socket = new WebSocket(base.replace('http:', 'ws:') + `/rooms/private/${room}`, { headers })
+      socket.on('error', reject)
+      socket.once('open', () => { socket.close(); reject(new Error('Unexpected WebSocket access')) })
+      socket.once('unexpected-response', (_request, response) => {
+        response.resume()
+        resolve(response.statusCode)
+      })
+    })
+    assert.equal(await rejectedSocket({ Origin: base }), 401)
+    assert.equal(await rejectedSocket({ Origin: 'https://other.example', Cookie: cookie(editorToken) }), 403)
+
+    const editor = await browser.newContext({ acceptDownloads: true })
+    const viewer = await browser.newContext()
+    try {
+      await editor.addCookies([{ name: 'colwork_session', value: editorToken, url: base, httpOnly: true }])
+      await viewer.addCookies([{ name: 'colwork_session', value: viewerToken, url: base, httpOnly: true }])
+      const page = await editor.newPage()
+      await page.goto(`${base}/test/document.html?id=${room}`)
+      const cell = page.locator('td[data-key="0:0"]')
+      await until(async () => await cell.getAttribute('aria-readonly') === 'false')
+      await cell.dblclick()
+      await page.locator('textarea').fill('已同步的私有文档')
+      await page.locator('textarea').press('Enter')
+      const read = await viewer.newPage()
+      await read.goto(`${base}/test/document.html?id=${room}&allowExport=1`)
+      await until(async () => await read.locator('td[data-key="0:0"] .colwork-table__cell-value').textContent() === '已同步的私有文档')
+      assert.equal(await read.locator('td[data-key="0:0"]').getAttribute('aria-readonly'), 'true')
+      assert.equal(await read.locator('#download').isDisabled(), true)
+      assert.equal(await read.locator('#xlsx').isDisabled(), true)
+      assert.equal(await read.locator('#import').isDisabled(), true)
+      assert.equal(await read.locator('.colwork-table__watermark').isVisible(), true)
+      assert.equal(await read.locator('#status').textContent(), '只读用户')
+      const [download] = await Promise.all([page.waitForEvent('download'), page.locator('#download').click()])
+      assert.equal(download.suggestedFilename(), 'colwork.snapshot.json')
+      const [xlsx] = await Promise.all([page.waitForEvent('download'), page.locator('#xlsx').click()])
+      assert.equal(xlsx.suggestedFilename(), 'colwork.xlsx')
+      const exportedWorkbook = new ExcelJS.Workbook()
+      await exportedWorkbook.xlsx.readFile(await xlsx.path())
+      assert.equal(exportedWorkbook.worksheets[0].getCell('A1').value, '已同步的私有文档')
+      const importedWorkbook = new ExcelJS.Workbook()
+      const imported = importedWorkbook.addWorksheet('Budget')
+      imported.getCell('A1').value = 12
+      imported.getCell('B1').value = { formula: 'A1*2', result: 24 }
+      await page.locator('#import').setInputFiles({
+        name: 'budget.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        buffer: Buffer.from(await importedWorkbook.xlsx.writeBuffer()),
+      })
+      await read.getByRole('button', { name: 'Budget', exact: true }).click()
+      await until(async () => await read.locator('td[data-key="0:1"] .colwork-table__cell-value').textContent() === '24')
+
+      const readOnlySocket = await new Promise((resolve, reject) => {
+        const socket = new WebSocket(base.replace('http:', 'ws:') + `/rooms/private/${room}`, {
+          headers: { Cookie: cookie(viewerToken), Origin: base },
+        })
+        socket.on('error', reject)
+        socket.once('open', () => resolve(socket))
+      })
+      try {
+        const forged = new Y.Doc()
+        forged.getMap('cells').set('0:1', 'forged write')
+        const confirmed = new Promise(resolve => {
+          readOnlySocket.on('message', message => {
+            const decoder = createDecoder(new Uint8Array(message))
+            if (readVarUint(decoder) === 0 && readVarUint(decoder) === 1) resolve()
+          })
+        })
+        // A sync reply confirms the Worker processed the preceding update frame.
+        readOnlySocket.send(syncUpdate(Y.encodeStateAsUpdate(forged)))
+        readOnlySocket.send(syncRequest(forged))
+        await confirmed
+        forged.destroy()
+      } finally { readOnlySocket.close() }
+      const response = await request('export', editorToken)
+      assert.equal(response.status, 200)
+      assert.match(response.headers.get('content-disposition'), /^attachment;/)
+      const archive = await response.json()
+      const exported = new Y.Doc()
+      Y.applyUpdate(exported, Buffer.from(archive.snapshot, 'base64'))
+      assert.equal(exported.getMap('cells').get('0:0'), '已同步的私有文档')
+      assert.equal(exported.getMap('cells').has('0:1'), false)
+      exported.destroy()
+      const publicRoom = await connect(room)
+      assert.equal(publicRoom.doc.getMap('cells').size, 0)
+    } finally { await editor.close(); await viewer.close() }
   })
 })

@@ -1,3 +1,5 @@
+import type { ColworkViewPolicy } from '@colwork-demo'
+
 declare const __COLWORK_CLOUDFLARE__: boolean
 export const cloudflareDeployment = typeof __COLWORK_CLOUDFLARE__ !== 'undefined' && __COLWORK_CLOUDFLARE__
 export type UserSettings = { id: string; nickname: string; color: string; delay: number }
@@ -36,4 +38,18 @@ export function websocketUrl(settings: UserSettings) {
 
 export function collaborationTransport() {
   return !cloudflareDeployment && new URLSearchParams(location.search).get('transport') === 'webrtc' ? 'webrtc' : 'websocket'
+}
+
+// Demo flags stand in for permissions and viewer identity supplied by a real host.
+const viewFlags = new URLSearchParams(location.search)
+export const demoAllowsExport = viewFlags.get('allowExport') !== '0'
+
+export function demoViewPolicy(nickname: string): ColworkViewPolicy {
+  return {
+    allowExport: demoAllowsExport,
+    watermark: {
+      viewerText: viewFlags.get('viewerWatermark') === '1' ? nickname : undefined,
+      fixedText: viewFlags.get('fixedWatermark') === '1' ? 'Colwork 协作演示' : undefined,
+    },
+  }
 }

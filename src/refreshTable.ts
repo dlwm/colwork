@@ -2,7 +2,9 @@ import type { Awareness } from 'y-protocols/awareness'
 import type { CellFormatting } from './formatting'
 import type { TableSelection } from './tableSelection'
 import { addCursorLabel, addSelectionOverlay } from './overlays'
-import { remoteSelectionRange, selectionRange, type AwarenessSelection } from './selection'
+import { remoteSelectionRange, selectionRange, type AwarenessPosition, type AwarenessSelection } from './selection'
+import type { SheetDocument } from './sheetDocument'
+import { MAIN_SHEET_ID } from './workbookModel'
 type RefreshView = {
   table: HTMLTableElement
   viewport: HTMLElement
@@ -10,6 +12,8 @@ type RefreshView = {
   formatting: CellFormatting
   selection: TableSelection
   awareness: Awareness
+  sheet: SheetDocument
+  renderContent(element: HTMLElement, key: string): void
   userColor?: string
   rowCount: number
   columnCount: number
@@ -22,8 +26,7 @@ export function refreshValues(view: RefreshView) {
       const key = cell.dataset.key
       if (key && cell !== active && key !== view.editingKey) {
         const value = cell.querySelector<HTMLElement>('.colwork-table__cell-value')
-        if (value) value.textContent = view.formatting.displayValue(key)
-        else cell.textContent = view.formatting.displayValue(key)
+        view.renderContent(value ?? cell, key)
       }
     })
   }
@@ -50,8 +53,25 @@ export function refreshCursors(view: RefreshView) {
     })
     view.viewport.querySelectorAll('.colwork-table__remote-selection').forEach((selection) => selection.remove())
     view.awareness.getStates().forEach((state, clientId) => {
-      if (clientId === view.awareness.clientID) return
-      const selectionState = state.selection as AwarenessSelection | undefined
+      if (clientId === view.awareness.clientID || (state.sheetId ?? MAIN_SHEET_ID) !== view.sheet.sheetId) return
+      const coordinates = view.sheet.coordinates
+      const position = (target?: AwarenessPosition) => {
+        if (!target || !Number.isSafeInteger(target.row) || !Number.isSafeInteger(target.column) || target.row < 0 || target.column < 0) return undefined
+        const row = typeof target.rowId === 'string' ? coordinates.axisPosition('row', target.rowId) : coordinates.visualRow(target.row)
+        const column = typeof target.columnId === 'string' ? coordinates.axisPosition('column', target.columnId) : target.column
+        return row === undefined || column === undefined ? undefined : { row, column }
+      }
+      const remote = state.selection as AwarenessSelection | undefined
+      const cursor = position(state.cursor)
+      const selectionState = remote && { ...remote, anchor: position(remote.anchor), focus: position(remote.focus) }
+      if (view.sheet.coordinates.hasRowOrder) {
+        const target = cursor ?? selectionState?.focus
+        if (target) {
+          const cell = view.table.querySelector<HTMLTableCellElement>(`td[data-key="${target.row}:${target.column}"]`)
+          if (cell) addCursorLabel(cell, state, clientId)
+        }
+        return
+      }
       if (selectionState?.anchor && selectionState.focus) {
         const remoteRange = remoteSelectionRange(selectionState, view.rowCount, view.columnCount)
         if (remoteRange) addSelectionOverlay(view.table, remoteRange, 'colwork-table__remote-selection', state.user?.color ?? '#94a3b8', (axis, index) => axis === 'row' ? view.size('row', index) : view.size('column', index))
@@ -60,7 +80,6 @@ export function refreshCursors(view: RefreshView) {
         const labelCell = view.table.querySelector<HTMLTableCellElement>(`td[data-key="${top}:${left}"]`)
         if (labelCell) addCursorLabel(labelCell, state, clientId)
       } else {
-        const cursor = state.cursor as { row: number; column: number } | undefined
         const cursorCell = cursor && view.table.querySelector<HTMLTableCellElement>(`td[data-key="${cursor.row}:${cursor.column}"]`)
         if (cursorCell) addCursorLabel(cursorCell, state, clientId)
       }
@@ -74,7 +93,7 @@ export function refreshStyles(view: RefreshView) {
         const value = cell.querySelector<HTMLElement>('.colwork-table__cell-value')
         if (value) {
           view.formatting.applyStyle(value, cell.dataset.key)
-          value.textContent = view.formatting.displayValue(cell.dataset.key)
+          view.renderContent(value, cell.dataset.key)
         }
       }
     })

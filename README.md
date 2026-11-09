@@ -33,6 +33,10 @@ const table = new ColworkTable(document.querySelector<HTMLElement>('#table')!, {
 
 在浏览器中创建实例，并准备好表格容器和自己的 Yjs WebSocket 服务；npm 包不包含服务端。包提供 ES / UMD 构建及 TypeScript 类型声明，Vue / React 示例见下方开发入口。通过浏览器直接使用 UMD 构建时，需要先提供 `Y`、`YAwareness`、`YWebrtc` 和 `YWebsocket` 全局依赖。
 
+### 从 0.2 升级到 0.3
+
+0.3 支持旧存档，并使用稳定的行列标识同步增删操作。在共享房间启用增删行列前，请将协作客户端统一升级到 0.3。使用仓库自带 Cloudflare 后端时，请同步升级服务端。默认行高改为 28 px，已有的自定义行高继续从存档读取。
+
 ## 宿主管理协作连接
 
 0.2.0 的 `external` 模式接受宿主创建的 Y.Doc 与 Awareness，适用于自选 Provider 的应用。Provider 的连接、重连、认证、保存和最终销毁由宿主负责。
@@ -95,6 +99,111 @@ type Presence = {
 
 多个组件可共享同一个 Awareness，最后交互的组件负责当前本机选区。销毁时仅清除仍属于本实例的选区、光标与编辑字段，保留宿主后续写入的字段和其他本机状态。
 
+## 工作簿、个人视图和 Excel
+
+打开本地的 `/test/workbook.html` 可以试用工作表标签、个人排序筛选、公式和 Excel 文件。加上相同的 `?room=team` 可在多个浏览器窗口使用同一协作工作簿。受保护文档同样使用工作簿组件。
+
+```ts
+import { ColworkWorkbook } from '@kuzuma/colwork'
+import '@kuzuma/colwork/colwork.css'
+import { importXlsx, exportXlsx } from '@kuzuma/colwork/xlsx'
+
+const workbook = new ColworkWorkbook(container, {
+  collaboration: { document, awareness },
+  user: viewer.displayName,
+})
+const [importedSheet] = await importXlsx(document, await file.arrayBuffer())
+workbook.setActiveSheet(importedSheet)
+const bytes = await exportXlsx(document)
+// 在受保护的场景，先从服务端取得经过授权的快照，再转换成 XLSX。
+```
+
+- **工作表**可以新增、改名、删除和切换。工作表及其内容会同步，当前标签和个人视图留在本机。已有单表存档会打开为第一张工作表。宿主可用 `listWorkbookSheets()` 获取工作表，再将表 ID 传给 `getSheetMaps()` 或 `readSheetSnapshot()`。
+- **个人排序筛选**可选择排序列和方向、保留标题行，并同时按多列的文字包含条件筛选。它只调整当前视图，编辑仍会写回对应记录。宿主可调用 `ColworkTable.setRowView()` 或 `openRowView()`。跨行合并的工作表需先拆分合并区域，增删行列前需清除当前视图。
+- **公式**可输入 `=A1*2`、`=SUM(B2:B8)`、`=IF(A1>0,"有值","空")` 或 `='预算表'!B2`。支持算术、比较、百分比、连接、范围、跨表引用，以及常用统计和逻辑函数。新增公式将引用绑定到工作表和行列标识，改名、插行后引用仍指向原记录。被删除的引用显示 `#REF!`，循环引用显示 `#CYCLE!`。用 `'=` 开头可录入以等号开头的文本。
+- **Excel**支持 `.xlsx` 工作表、常见值、公式、合并、行列尺寸和 Colwork 支持的单元格格式。导入将工作表加到当前工作簿，独立的新建文档可传入 `{ replaceBlankMain: true }` 复用空白首页。导出使用共享顺序和全量可见工作表数据。导入上限为 10 MB、32 张工作表、十万单元格。受保护文档还受单条协作更新的 1 MiB 限制。Colwork 的计算器支持常用函数，其他 Excel 函数可随公式往返保留。宏、图表、条件格式等 Excel 特有对象不在当前兼容范围内。
+
+## 单元格图片
+
+在创建 `ColworkTable` 或 `ColworkWorkbook` 时传入 `images`。`upload` 负责调用宿主上传接口并返回稳定资源 ID，`resolveUrl` 把 ID 转成当前用户可读取的地址。工作簿只同步图片 ID 和可选说明。只读组件可以仅提供 `resolveUrl`。
+
+```ts
+const images = {
+  async upload(file: File) {
+    const form = new FormData()
+    form.append('file', file)
+    const response = await fetch('/api/assets', { method: 'POST', body: form })
+    if (!response.ok) throw new Error('图片上传失败')
+    return await response.json() as { id: string; alt?: string }
+  },
+  resolveUrl(id: string) {
+    return '/api/assets/' + encodeURIComponent(id)
+  },
+}
+const table = new ColworkTable(container, { ...options, images })
+```
+
+选中单元格后可通过「插入图片」选择文件，也可直接粘贴 PNG、JPEG、GIF 或 WebP。宿主应在上传和取图接口校验权限。私有图片可以使用同源鉴权地址或由宿主生成的短期签名地址。Yjs 快照保留图片引用，恢复快照时仍需访问原图片资源。Excel 导出目前写入图片说明。
+
+本地 Cloudflare 演示提供临时上传接口，每张图片最多 512 KB。业务部署应接入宿主自己的存储和权限。
+
+## 水印与导出策略
+
+宿主可以在构造时传入 `viewPolicy`，权限或身份变化时用 `setViewPolicy()` 替换整份策略。下面的 `permissions` 和 `viewer` 由宿主应用提供。
+
+```ts
+import { ColworkTable, type ColworkViewPolicy } from '@kuzuma/colwork'
+
+const viewPolicy: ColworkViewPolicy = {
+  watermark: {
+    viewerText: permissions.addViewerWatermark ? viewer.displayName : undefined,
+    fixedText: permissions.addFixedWatermark ? permissions.fixedWatermarkText : undefined,
+  },
+  allowExport: permissions.allowExport === true,
+}
+const table = new ColworkTable(container, { ...options, viewPolicy })
+
+// 根据 canExport() 显示或禁用宿主的导出按钮。
+if (table.canExport()) {
+  table.commitEditing()
+  const snapshot = table.getYjsSnapshot()
+  // 由宿主保存或下载 snapshot。
+}
+// 宿主收到新策略后调用 table.setViewPolicy(nextViewPolicy)。
+```
+
+- `viewerText` 与 `fixedText` 独立生效，可以同时显示。空白文本关闭对应水印，长文本以省略号截断。水印随视口覆盖在表格上，删除水印节点或改写其属性后会自动恢复。每个实例独立应用策略，水印文字留在本机，不进入协作数据或存档。
+- `allowExport` 默认开启，兼容旧接入。关闭后，`canExport()` 返回 `false`，`getYjsSnapshot()` 和 `getYjsUpdateLog()` 抛出 `NotAllowedError`。宿主管理的后台保存可继续使用宿主持有的文档及模型 API。
+- 宿主应从可信业务策略和当前登录身份生成配置，并在自己的文件下载或导出接口校验权限。浏览器内的水印与导出限制提供客户端防护，表格数据仍需交给浏览器渲染。
+
+从本地源码运行的 Vue 和 React 演示可用 `?viewerWatermark=1&fixedWatermark=1&allowExport=0` 查看两种水印和禁用导出的效果。查询参数只用于演示。
+
+### 受保护文档
+
+Cloudflare 部署提供独立的受保护文档入口 `/test/document.html?id=DOCUMENT_ID`。宿主在用户登录后，按账号和文档权限签发短期 `colwork_session` Cookie。受保护房间与公开演示房间分别存储。文档标识支持 1 到 128 个 ASCII 字母、数字、下划线和连字符。
+
+在 Worker 的后端配置至少 32 字节的随机密钥 `COLWORK_SESSION_SECRET`，宿主签发端使用同一份密钥。以下是 Node 签发示例。账号、文档和权限字段均由宿主服务端生成。
+
+```js
+import { createHmac } from 'node:crypto'
+
+const claims = {
+  aud: 'colwork',
+  sub: user.id,
+  name: user.displayName,
+  exp: Math.floor(Date.now() / 1000) + 300,
+  documents: [{ id: document.id, canEdit: true, allowExport: false, viewerWatermark: true, fixedWatermark: '内部资料' }],
+}
+const payload = 'v1.' + Buffer.from(JSON.stringify(claims)).toString('base64url')
+const token = payload + '.' + createHmac('sha256', process.env.COLWORK_SESSION_SECRET).update(payload).digest('base64url')
+const cookie = `colwork_session=${token}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=300`
+// 由宿主在承载 Colwork 的同一来源返回 Set-Cookie。
+```
+
+- `GET /api/documents/:id/view-policy` 返回经验证的登录名称、编辑权限及当前文档的水印策略。会话最长接受 15 分钟有效期，令牌最多 3800 字符。权限变更后由宿主签发新会话。
+- `GET /api/documents/:id/export` 在每次请求时校验会话和导出权限，下载服务端已经同步的 Yjs 快照。只读权限和导出权限分别判断。
+- `/rooms/private/:id` 验证同源 WebSocket 和相同的登录会话，只读连接无法写入文档。支持查看文档的浏览器会收到渲染所需的同步数据。
+
 ## 文档模型与 Node 入口
 
 `@kuzuma/colwork/model` 提供 ES / CommonJS 与独立类型声明，可在 Node 中导入，运行时仅依赖 Yjs。此入口用于校验、数据读取、空表初始化和存档导出。
@@ -124,7 +233,7 @@ const sheet = readSheetSnapshot(document)
 const archive = exportYjsSnapshot(document, { room: 'optional-label', sequence: 0 })
 ```
 
-公开线格式版本为 `COLWORK_SCHEMA_VERSION = 1`，兼容 0.1.0 的存档。所有根类型均为 `Y.Map`。`COLWORK_MAP_NAMES` 提供下列根名。
+公开快照格式版本为 `COLWORK_SCHEMA_VERSION = 1`，兼容 0.1.0 的存档。`COLWORK_MAP_NAMES` 提供下列 `Y.Map` 根名。
 
 | 根名 | Key | Value |
 | --- | --- | --- |
@@ -143,6 +252,8 @@ const archive = exportYjsSnapshot(document, { room: 'optional-label', sequence: 
 `readSheetSnapshot()` 校验后返回稀疏、可 JSON 序列化的 `SheetSnapshot`。字段依次为 `schemaVersion`、`rowCount`、`columnCount`、`cells`、`styles`、`rowHeights`、`columnWidths`、`merges` 和 `locks`。记录按数字坐标排序，样式、边框与密码记录使用固定字段顺序，合并按起点和终点排序。返回值不包含存档标识、更新序号或在线状态，适合宿主计算内容摘要。尺寸从持久条目推导，最小为 1，空白视图容量与固定窗格属于本地状态。渲染时合并块裁剪为可见片段，值、样式和编辑仍映射到原始左上角单元格，巨型合并不会扩张整块 DOM。显示尺寸沿用交互界面的最小行高与列宽，较小的持久尺寸会在本地显示时夹取，原始文档数值保留。
 
 `readSheetSnapshotUpdate(bytes, limits?)` 从完整 Yjs 状态更新读取相同结构，内部释放临时文档。尚有未解析插入或删除依赖的增量会被拒绝。`initializeBlankSheet()` 只接受空白表格，设置 `schemaVersion` 和 `initialized` 标记，可重复调用。`exportYjsSnapshot()` 返回原有 `colwork.snapshot` 格式，包含 Base64 状态与状态向量。导出保留 Yjs 原始状态，宿主可在调用前按自己的限制校验。
+
+增删行列使用可选的 `colwork-row-edits`、`colwork-column-edits` 协作序列。原有单元格保留稳定标识，插入行列使用新标识，删除记录让相应标识从视图中消失。并发写入已删除行列的值不会显示，撤销删除可恢复该行列。原始 Yjs 快照可能包含已删除行列的并发写入，`readSheetSnapshot()` 只返回可见数据。旧快照直接载入，发生增删行列后，协作各方应使用支持该序列的版本。宿主直接写入 `getSheetMaps().cells` 前可用 `getSheetCellStorageKey(doc, '0:0')` 将显示坐标转换为存储键。
 
 ## 开发
 
@@ -167,7 +278,7 @@ npm run dev -- --source=local
 npm run dev -- --source=npm
 ```
 
-npm 模式自动从官方 registry 安装 `@kuzuma/colwork@0.2.0` 到被 Git 忽略的 `.wrangler/npm-demo/`，不会修改项目依赖或锁文件；本地模式保留源码热更新。若要测试其他已发布版本，设置 `COLWORK_NPM_VERSION`：
+npm 模式自动从官方 registry 安装 `@kuzuma/colwork@0.3.0` 到被 Git 忽略的 `.wrangler/npm-demo/`，不会修改项目依赖或锁文件；本地模式保留源码热更新。若要测试其他已发布版本，设置 `COLWORK_NPM_VERSION`：
 
 ```sh
 COLWORK_NPM_VERSION=latest npm run dev -- --source=npm

@@ -7,6 +7,7 @@ import type { SheetDocument } from './sheetDocument'
 import type { TableSelection } from './tableSelection'
 import type { CellEditor } from './cellEditor'
 import type { CellFormatting } from './formatting'
+import { encodeCellImage, imageLabel, readCellImage } from './cellImage'
 const clipboardMime = 'application/x-colwork-cells'
 type ClipboardPayload = { values: string[][]; styles: Array<Array<CellStyle | null>> }
 type ClipboardHost = {
@@ -15,6 +16,7 @@ type ClipboardHost = {
   editing: CellEditor
   formatting: CellFormatting
   canEdit(): boolean
+  pasteImage?(file: File): void
   dimensions(): { rows: number; columns: number }
   render(): void
   origin: unknown
@@ -40,7 +42,8 @@ export class TableClipboard {
       const styleRow: Array<CellStyle | null> = []
       for (let column = range.start.column; column <= range.end.column; column++) {
         const key = cellKey({ row, column })
-        valueRow.push(sheet.cells.get(key) ?? '')
+        const raw = sheet.cells.get(key)
+        valueRow.push(raw && readCellImage(raw) ? raw : sheet.readCell(key))
         const style = formatting.readStyle(key)
         styleRow.push(Object.keys(style).length ? style : null)
       }
@@ -50,7 +53,8 @@ export class TableClipboard {
     return { values, styles }
   }
   copySelection() {
-    const text = this.payload()?.values.map(row => row.join('\t')).join('\n')
+    const payload = this.payload()
+    const text = payload && this.plainText(payload)
     if (text) void navigator.clipboard?.writeText(text)
   }
   readonly onCopy = (event: ClipboardEvent) => {
@@ -58,11 +62,18 @@ export class TableClipboard {
     if (event.target instanceof HTMLTextAreaElement) return
     const payload = this.payload()
     if (!payload || !event.clipboardData) return
-    event.clipboardData.setData('text/plain', payload.values.map(row => row.join('\t')).join('\n'))
+    event.clipboardData.setData('text/plain', this.plainText(payload))
     event.clipboardData.setData(clipboardMime, JSON.stringify(payload))
     event.preventDefault()
   }
   readonly onPaste = (event: ClipboardEvent) => {
+    const image = Array.from(event.clipboardData?.files ?? []).find(file => file.type.startsWith('image/'))
+    if (image && this.host.pasteImage && this.host.canEdit() && this.host.selection.focus) {
+      event.preventDefault()
+      event.stopPropagation()
+      this.host.pasteImage(image)
+      return
+    }
     if (event.target instanceof HTMLTextAreaElement) return
     event.preventDefault()
     event.stopPropagation()
@@ -84,7 +95,9 @@ export class TableClipboard {
       const position = { row: start.row + r, column: start.column + c }
       if (position.row >= dimensions.rows || position.column >= dimensions.columns) return
       const key = cellKey(position)
-      sheet.cells.set(key, normalizeCellText(value))
+      const image = styles && readCellImage(value)
+      if (image) sheet.cells.set(key, encodeCellImage(image))
+      else sheet.writeCell(key, normalizeCellText(value))
       if (styles) {
         const style = styles[r]?.[c]
         if (style) sheet.styles.set(key, JSON.stringify(style))
@@ -94,5 +107,12 @@ export class TableClipboard {
     selection.anchor = start
     selection.focus = { row: Math.min(dimensions.rows - 1, start.row + rows.length - 1), column: Math.min(dimensions.columns - 1, start.column + Math.max(...rows.map(row => row.length)) - 1) }
     this.host.render()
+  }
+
+  private plainText(payload: ClipboardPayload) {
+    return payload.values.map(row => row.map(value => {
+      const image = readCellImage(value)
+      return image ? imageLabel(image) : value
+    }).join('\t')).join('\n')
   }
 }

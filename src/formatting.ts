@@ -2,6 +2,7 @@ import type * as Y from 'yjs'
 import { cellKey } from './range'
 import { isCellStyle } from './model-validation'
 import type { CellBorder, CellStyle } from './model-schema'
+import type { ProjectedMap } from './sheetCoordinates'
 export type BooleanStyleKey = 'bold' | 'italic' | 'underline' | 'strike' | 'wrap'
 export type BorderMode = 'outer' | 'inner' | 'horizontal' | 'vertical'
 type FormatHost = {
@@ -9,12 +10,13 @@ type FormatHost = {
   zoom(): number
   canEdit(): boolean
   selectedKey(): string | undefined
+  readValue(key: string): string
   bounds(): { top: number; bottom: number; left: number; right: number }
   render(): void
 }
 
 export class CellFormatting {
-  constructor(private readonly doc: Y.Doc, private readonly cells: Y.Map<string>, private readonly styles: Y.Map<string>, private readonly host: FormatHost) {}
+  constructor(private readonly doc: Y.Doc, private readonly styles: ProjectedMap<string>, private readonly host: FormatHost) {}
 
   readStyle(key: string): CellStyle {
     try {
@@ -45,7 +47,7 @@ export class CellFormatting {
   }
 
   displayValue(key: string) {
-    const value = this.cells.get(key) ?? ''
+    const value = this.host.readValue(key)
     const format = this.readStyle(key).format ?? 'general'
     if (!value || format === 'general') return value
     if (format === 'number') {

@@ -1,10 +1,11 @@
 import { normalizeRange, type CellPosition, type CellRange } from './range'
 
 export type SelectionMode = 'row' | 'column' | 'all'
+export type AwarenessPosition = CellPosition & { rowId?: string; columnId?: string }
 
 export type AwarenessSelection = {
-  anchor?: CellPosition
-  focus?: CellPosition
+  anchor?: AwarenessPosition
+  focus?: AwarenessPosition
   mode?: SelectionMode
 }
 

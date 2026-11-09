@@ -89,7 +89,7 @@ export class CollaborationSession {
     if (state === null) return
     const next = { ...state }
     let changed = false
-    for (const field of ['selection', 'cursor', 'editing']) {
+    for (const field of ['selection', 'cursor', 'editing', 'sheetId']) {
       if (field in this.published && next[field] === this.published[field]) {
         delete next[field]
         changed = true

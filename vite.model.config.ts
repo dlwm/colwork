@@ -5,7 +5,7 @@ import { writeFile } from 'node:fs/promises'
 export default defineConfig({
   plugins: [dts({
     tsconfigPath: './tsconfig.lib.json', entryRoot: 'src',
-    include: ['src/model*.ts', 'src/range.ts', 'src/yjsArchive.ts', 'src/yjsRebuild.ts'],
+    include: ['src/model*.ts', 'src/range.ts', 'src/workbookModel.ts', 'src/xlsx.ts', 'src/yjsArchive.ts', 'src/yjsRebuild.ts'],
     beforeWriteFile(filePath, content) {
       return { filePath, content: content.replace(/(from\s+['"])(\.{1,2}\/[^'"]+)(['"])/g, '$1$2.js$3') }
     },
@@ -20,10 +20,10 @@ export default defineConfig({
   build: {
     emptyOutDir: false,
     lib: {
-      entry: 'src/model.ts',
-      fileName: format => format === 'es' ? 'model.js' : 'model.cjs',
+      entry: { model: 'src/model.ts', xlsx: 'src/xlsx.ts' },
+      fileName: (format, name) => format === 'es' ? `${name}.js` : `${name}.cjs`,
       formats: ['es', 'cjs'],
     },
-    rollupOptions: { external: ['yjs'] },
+    rollupOptions: { external: ['yjs', 'exceljs', 'jszip'] },
   },
 })

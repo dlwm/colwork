@@ -28,6 +28,13 @@ async function mount(page, room = `test-${Date.now()}`) {
   }, { room, websocketUrl })
 }
 const cell = (page, key) => page.locator(`td[data-key="${key}"]`)
+async function scrollToRow(page, row, left = 0) {
+  await page.evaluate(({ row, left }) => {
+    let top = 0
+    for (let index = 0; index < row; index++) top += table.getRowHeight(index)
+    table.viewport.scrollTo(left, top)
+  }, { row, left })
+}
 async function selectionEdges(page, selector = '.colwork-table__selection') {
   return page.locator(selector).evaluateAll(elements => {
     const boxes = elements.map(element => element.getBoundingClientRect())
@@ -201,7 +208,7 @@ test('fixed rows/columns survive virtual scrolling, merges, zoom, and unfreeze',
   await page.getByRole('button', { name: '固定至选中列', exact: true }).click()
   await page.mouse.move(1100, 800)
   const before = await cell(page, '0:0').boundingBox()
-  await page.evaluate(() => { table.viewport.scrollTop = 1800; table.viewport.scrollLeft = 1400 })
+  await scrollToRow(page, 31, 1400)
   await expect.poll(async () => page.evaluate(() => !!document.querySelector('td[data-key="35:0"]'))).toBe(true)
   const after = await cell(page, '0:0').boundingBox()
   expect(Math.abs(after.x - before.x)).toBeLessThan(1)
@@ -555,7 +562,7 @@ test('password hatching and frozen styles follow scroll, zoom and remote style u
   expect(hatch.events).toBe('none')
   expect(hatch.top).toBe('0px')
   expect(hatch.bottom).toBe('0px')
-  await page.evaluate(() => { table.viewport.scrollTop = 1600; table.viewport.scrollLeft = 1200 })
+  await scrollToRow(page, 28, 1200)
   await expect.poll(() => page.evaluate(() => !!document.querySelector('td[data-key="35:0"]'))).toBe(true)
   const after = await cell(page, '1:1').boundingBox()
   expect(Math.abs(after.x - before.x)).toBeLessThan(1)
@@ -646,7 +653,7 @@ test('header drag survives virtual rerender and frozen headers, publishes range,
   await mount(peer, room)
   await page.evaluate(() => table.setFrozenPanes(1, 3))
   await dragHeaders(page, 'row', 0, 3)
-  await page.evaluate(() => { table.viewport.scrollTop = 1600 })
+  await scrollToRow(page, 26)
   await expect(page.locator('th[data-selection-axis="row"][data-selection-index="30"]')).toBeVisible()
   const target = await headerPoint(page, 'row', 30)
   await page.mouse.move(target.x, target.y, { steps: 8 })
@@ -678,7 +685,7 @@ test('frozen boundaries follow panes and grouped controls fit desktop and narrow
   await expect(vertical).toBeVisible()
   await expect(vertical).toHaveCSS('pointer-events', 'none')
   const before = { row: await horizontal.boundingBox(), column: await vertical.boundingBox() }
-  await page.evaluate(() => { table.viewport.scrollTop = 1600; table.viewport.scrollLeft = 1400 })
+  await scrollToRow(page, 28, 1400)
   await expect.poll(() => page.evaluate(() => !!document.querySelector('td[data-key="35:0"]'))).toBe(true)
   expect(Math.abs((await horizontal.boundingBox()).y - before.row.y)).toBeLessThan(1)
   expect(Math.abs((await vertical.boundingBox()).x - before.column.x)).toBeLessThan(1)
@@ -725,6 +732,19 @@ test('frozen boundaries follow panes and grouped controls fit desktop and narrow
   await expect(page.locator('.colwork-table__frozen-boundary')).toHaveCount(0)
 })
 
+test('compact rows fit the editor and preserve custom heights', async ({ page }) => {
+  await mount(page)
+  expect((await cell(page, '1:0').boundingBox()).height).toBe(28)
+  expect((await cell(page, '3:0').boundingBox()).height).toBe(56)
+  await cell(page, '1:0').dblclick()
+  const editor = page.locator('textarea')
+  await editor.fill('compact row')
+  expect(await editor.evaluate(element => element.scrollHeight === element.clientHeight)).toBe(true)
+  await editor.press('Enter')
+  await expect(cell(page, '1:0')).toHaveText('compact row')
+  expect((await cell(page, '1:0').boundingBox()).height).toBe(28)
+})
+
 test('frozen and unfrozen headers remain resizable and cells remain editable', async ({ page }) => {
   await mount(page)
   await page.evaluate(() => table.setFrozenPanes(2, 3))
@@ -748,7 +768,7 @@ test('frozen and unfrozen headers remain resizable and cells remain editable', a
   await resize('column', 2, 25)
   await resize('row', 0, 20)
   await resize('row', 1, 18)
-  await page.evaluate(() => { table.viewport.scrollTop = 1300; table.viewport.scrollLeft = 1000 })
+  await scrollToRow(page, 24, 1000)
   await expect.poll(() => page.evaluate(() => !!document.querySelector('td[data-key="28:0"]'))).toBe(true)
   await resize('column', 1, 16)
   await resize('row', 1, 12)

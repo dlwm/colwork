@@ -18,11 +18,12 @@ type RenderView = {
   showGridLines: boolean
   readOnly: boolean
   getRowHeight(row: number): number
+  rowLabel(row: number): string
   getColumnWidth(column: number): number
   getMergeRanges(): CellRange[]
   isCellLocked(key: string, merge: CellRange | null): boolean
   isCellPasswordLocked(key: string, merge: CellRange | null): boolean
-  displayValue(key: string): string
+  renderContent(element: HTMLElement, key: string): void
   applyStyle(element: HTMLElement, key: string): void
   addResizeHandle(element: HTMLElement, axis: 'row' | 'column', index: number): void
   addHeaderSelection(element: HTMLElement, axis: 'row' | 'column', index: number): void
@@ -135,7 +136,7 @@ export function renderTable(state: RenderView) {
     number.style.width = `${state.rowHeaderWidth}px`
     number.style.height = `${rowSize(row)}px`
     number.style.fontSize = `${HEADER_FONT_SIZE * state.zoomRatio}px`
-    number.textContent = String(row + 1)
+    number.textContent = state.rowLabel(row)
     state.addResizeHandle(number, 'row', row)
     state.addHeaderSelection(number, 'row', row)
     tr.append(number)
@@ -169,7 +170,7 @@ export function renderTable(state: RenderView) {
       value.className = 'colwork-table__cell-value'
       value.style.height = `${Math.max(0, rowSize(row) - 4)}px`
       value.style.maxHeight = `${Math.max(0, rowSize(row) - 4)}px`
-      value.textContent = state.displayValue(key)
+      state.renderContent(value, key)
       state.applyStyle(value, key)
       td.append(value)
       state.applyStyle(td, key)

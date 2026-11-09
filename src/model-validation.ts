@@ -1,8 +1,10 @@
 import * as Y from 'yjs'
 import { isUnicodeString } from './unicode'
-import { COLWORK_MAP_NAMES, COLWORK_SCHEMA_VERSION, parseCellKey, parseMergeKey, type CellStyle, type PasswordLock, type SheetMaps, type SheetValidationIssue, type SheetValidationLimits } from './model-schema'
+import { COLWORK_MAP_NAMES, COLWORK_SCHEMA_VERSION, type CellStyle, type PasswordLock, type SheetMaps, type SheetValidationIssue, type SheetValidationLimits } from './model-schema'
 import { hasOverlappingMerges } from './model-merges'
 import type { CellRange } from './range'
+import { axisRootNames, parseAxisId, SheetCoordinates, type SheetAxis } from './sheetCoordinates'
+import { sheetRoot, sheetIdPattern, workbookRoot, workbookOrderRoot } from './workbookModel'
 
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
 const knownKeys = (value: Record<string, unknown>, names: string[]) => Object.keys(value).every(key => names.includes(key))
@@ -29,15 +31,16 @@ export function isCellStyle(value: unknown): value is CellStyle {
 }
 
 /** Materializes named Y.Map roots, preserving the version-one encoding. */
-export function getSheetMaps(document: Y.Doc): SheetMaps {
+export function getSheetMaps(document: Y.Doc, sheetId?: string): SheetMaps {
+  const root = (name: string) => sheetRoot(name, sheetId)
   return {
-    cells: document.getMap(COLWORK_MAP_NAMES.cells), styles: document.getMap(COLWORK_MAP_NAMES.styles),
-    rowHeights: document.getMap(COLWORK_MAP_NAMES.rowHeights), columnWidths: document.getMap(COLWORK_MAP_NAMES.columnWidths),
-    merges: document.getMap(COLWORK_MAP_NAMES.merges), locks: document.getMap(COLWORK_MAP_NAMES.locks),
+    cells: document.getMap(root(COLWORK_MAP_NAMES.cells)), styles: document.getMap(root(COLWORK_MAP_NAMES.styles)),
+    rowHeights: document.getMap(root(COLWORK_MAP_NAMES.rowHeights)), columnWidths: document.getMap(root(COLWORK_MAP_NAMES.columnWidths)),
+    merges: document.getMap(root(COLWORK_MAP_NAMES.merges)), locks: document.getMap(root(COLWORK_MAP_NAMES.locks)),
   }
 }
 
-export function validateSheetDocument(document: Y.Doc, limits: SheetValidationLimits = {}): SheetValidationIssue[] {
+export function validateSheetDocument(document: Y.Doc, limits: SheetValidationLimits = {}, sheetId?: string): SheetValidationIssue[] {
   for (const key of ['maxRows', 'maxColumns', 'maxEntries', 'maxStringLength', 'maxMergeArea', 'maxMerges'] as const) {
     const value = limits[key]
     if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) throw new RangeError(`${key} must be a non-negative safe integer`)
@@ -48,24 +51,56 @@ export function validateSheetDocument(document: Y.Doc, limits: SheetValidationLi
   }
   const issue = (path: string, message: string) => { issues.push({ path, message }) }
   if (!limits.allowUnknownRoots) {
+    const names = new Set<string>([...Object.values(COLWORK_MAP_NAMES), ...Object.values(axisRootNames)])
     for (const key of document.share.keys()) {
-      if (!(Object.values(COLWORK_MAP_NAMES) as string[]).includes(key)) issue(key, 'Unknown document root')
+      if (key === workbookRoot || key === workbookOrderRoot || names.has(key)) continue
+      const [prefix, id, name, extra] = key.split(':')
+      if (prefix !== 'colwork-sheet' || !sheetIdPattern.test(id ?? '') || !names.has(name) || extra !== undefined) issue(key, 'Unknown document root')
     }
   }
   let maps: SheetMaps
   let metadata: Y.Map<unknown>
-  try { maps = getSheetMaps(document); metadata = document.getMap(COLWORK_MAP_NAMES.metadata) } catch {
+  let coordinates: SheetCoordinates
+  try { maps = getSheetMaps(document, sheetId); metadata = document.getMap(sheetRoot(COLWORK_MAP_NAMES.metadata, sheetId)) } catch {
     return [...issues, { path: '$', message: 'Sheet roots must be Y.Map values' }]
+  }
+  try { coordinates = new SheetCoordinates(document, sheetId) } catch {
+    return [...issues, { path: '$', message: 'Axis edits must be Y.Array values' }]
   }
   // Yjs can apply sequence content to a pre-materialized map. Map iteration alone
   // cannot detect these incompatible text/array/XML updates, including embeds.
   for (const [name, map] of [...Object.entries(maps), ['metadata', metadata]] as Array<[string, Y.Map<unknown>]>) {
     if (!(map instanceof Y.Map) || map._start !== null) issue(name, 'Expected map entries without sequence content')
   }
-  const count = Object.values(maps).reduce((total, map) => total + map.size, metadata.size)
+  for (const axis of ['row', 'column'] as const) {
+    const operations = coordinates.edits[axis]
+    if (operations._map.size) issue(axisRootNames[axis], 'Expected sequence content without map entries')
+    const inserted = new Set<string>()
+    operations.forEach((operation, index) => {
+      const id = typeof operation === 'string' ? parseAxisId(operation.startsWith('!') ? operation.slice(1) : operation) : undefined
+      if (!id || (!operation.startsWith('!') && (!id.inserted || inserted.has(operation)))) {
+        issue(`${axisRootNames[axis]}.${index}`, 'Invalid or duplicate axis operation')
+      } else if (!operation.startsWith('!')) {
+        inserted.add(operation)
+      }
+    })
+    const bound = axis === 'row' ? limits.maxRows : limits.maxColumns
+    const extent = coordinates.extent(axis)
+    if (!Number.isSafeInteger(extent) || (extent > 1 && bound !== undefined && extent > bound)) issue(axisRootNames[axis], 'Axis exceeds the allowed extent')
+  }
+  const count = Object.values(maps).reduce((total, map) => total + map.size,
+    metadata.size + coordinates.edits.row.length + coordinates.edits.column.length)
   if (limits.maxEntries !== undefined && count > limits.maxEntries) issue('$', 'Document exceeds maxEntries')
   const positionValid = (row: number, column: number) => row < Number.MAX_SAFE_INTEGER && column < Number.MAX_SAFE_INTEGER
     && (limits.maxRows === undefined || row < limits.maxRows) && (limits.maxColumns === undefined || column < limits.maxColumns)
+  const axisIdValid = (axis: SheetAxis, id: string) => {
+    const parsed = parseAxisId(id)
+    return !!parsed && (!parsed.inserted || coordinates.edits[axis]._start !== null)
+  }
+  const cellIdValid = (id: string) => {
+    const [row, column, extra] = id.split(':')
+    return row !== undefined && column !== undefined && extra === undefined && axisIdValid('row', row) && axisIdValid('column', column)
+  }
   const jsonValid = (value: unknown, check: (parsed: unknown) => boolean) => {
     if (typeof value !== 'string') return false
     try { return check(JSON.parse(value)) } catch { return false }
@@ -75,8 +110,8 @@ export function validateSheetDocument(document: Y.Doc, limits: SheetValidationLi
   }
   for (const name of ['cells', 'styles', 'locks'] as const) {
     maps[name].forEach((value, key) => {
-      const position = parseCellKey(key)
-      if (!position || !positionValid(position.row, position.column)) issue(`${name}.${key}`, 'Invalid or out-of-bounds row:column key')
+      const position = coordinates.cellPosition(key)
+      if (!cellIdValid(key) || (position && !positionValid(position.row, position.column))) issue(`${name}.${key}`, 'Invalid or out-of-bounds row:column key')
       stringValid(name, key, value)
       if (name === 'cells' && (typeof value !== 'string' || !isUnicodeString(value))) issue(`${name}.${key}`, 'Cell values must be strings')
       if (name === 'styles' && !jsonValid(value, isCellStyle)) issue(`${name}.${key}`, 'Expected a JSON CellStyle object')
@@ -85,18 +120,24 @@ export function validateSheetDocument(document: Y.Doc, limits: SheetValidationLi
   }
   for (const name of ['rowHeights', 'columnWidths'] as const) {
     maps[name].forEach((value, key) => {
-      const index = Number(key)
-      const bound = name === 'rowHeights' ? limits.maxRows : limits.maxColumns
-      if (!/^(0|[1-9]\d*)$/.test(key) || !Number.isSafeInteger(index) || index >= Number.MAX_SAFE_INTEGER || (bound !== undefined && index >= bound)) issue(`${name}.${key}`, 'Invalid or out-of-bounds index')
+      const axis = name === 'rowHeights' ? 'row' : 'column'
+      const index = coordinates.axisPosition(axis, key)
+      const bound = axis === 'row' ? limits.maxRows : limits.maxColumns
+      if (!axisIdValid(axis, key) || (index !== undefined && (!Number.isSafeInteger(index) || index >= Number.MAX_SAFE_INTEGER || (bound !== undefined && index >= bound)))) issue(`${name}.${key}`, 'Invalid or out-of-bounds index')
       if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) issue(`${name}.${key}`, 'Sizes must be finite positive numbers')
     })
   }
   if (limits.maxMerges !== undefined && maps.merges.size > limits.maxMerges) issue('merges', 'Document exceeds maxMerges')
   const merges: CellRange[] = []
   maps.merges.forEach((value, key) => {
-    const range = parseMergeKey(key)
-    if (!range || value !== '1' || !positionValid(range.end.row, range.end.column)) issue(`merges.${key}`, 'Invalid or out-of-bounds merge range')
-    else {
+    const [startId, endId, extra] = key.split('-')
+    const start = startId && coordinates.cellPosition(startId)
+    const end = endId && coordinates.cellPosition(endId)
+    if (!startId || !endId || extra !== undefined || !cellIdValid(startId) || !cellIdValid(endId) || value !== '1'
+      || (start && end && (start.row > end.row || start.column > end.column || !positionValid(end.row, end.column)))) {
+      issue(`merges.${key}`, 'Invalid or out-of-bounds merge range')
+    } else if (start && end) {
+      const range = { start, end }
       if (limits.maxMergeArea !== undefined && range.end.row - range.start.row + 1 > limits.maxMergeArea / (range.end.column - range.start.column + 1)) {
         issue(`merges.${key}`, 'Merge exceeds maxMergeArea')
       }

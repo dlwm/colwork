@@ -1,6 +1,6 @@
 {
   "name": "@kuzuma/colwork",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "type": "module",
   "scripts": {
@@ -21,6 +21,8 @@
     "test:model": "node --test test/model/*.test.mjs"
   },
   "dependencies": {
+    "exceljs": "^4.4.0",
+    "jszip": "^3.10.1",
     "y-protocols": "^1.0.7",
     "y-webrtc": "^10.3.0",
     "y-websocket": "^2.1.0",
@@ -53,6 +55,10 @@
       "require": "./dist/colwork.umd.cjs"
     },
     "./colwork.css": "./dist/colwork.css",
+    "./xlsx": {
+      "import": { "types": "./dist/xlsx.d.ts", "default": "./dist/xlsx.js" },
+      "require": { "types": "./dist/xlsx.d.cts", "default": "./dist/xlsx.cjs" }
+    },
     "./model": {
       "import": {
         "types": "./dist/model.d.ts",

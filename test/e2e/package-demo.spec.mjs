@@ -72,6 +72,10 @@ test('existing Vue and React demos collaborate through a local isolated WebSocke
     await configure(peer)
     await page.goto('/test/vue.html')
     await peer.goto('/test/react.html')
+    // Initial remote formatting can redraw the editor while the room is connecting.
+    for (const client of [page, peer]) {
+      await expect(client.locator('.log-body').filter({ hasText: /\bsynced$/ }).first()).toBeAttached()
+    }
     const source = page.locator('td[data-key="1:4"]')
     const destination = peer.locator('td[data-key="1:4"]')
     await expect(source).toBeVisible()
