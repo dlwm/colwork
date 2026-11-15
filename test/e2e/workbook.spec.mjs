@@ -108,3 +108,16 @@ test('workbook page uploads and downloads actual Excel files in the browser', as
   expect(exported.getWorksheet('Imported').getCell('B1').formula).toBe('A1*2')
   expect(exported.getWorksheet('Imported').getCell('B1').result).toBe(42)
 })
+
+test('dragging a tab synchronizes its order without switching the peer tab', async ({ page }) => {
+  await mountPeers(page)
+  const local = page.locator('#table')
+  const peer = page.locator('#peer')
+  await local.getByRole('button', { name: '新增工作表' }).click()
+  const first = local.getByRole('button', { name: '工作表1', exact: true })
+  const second = local.getByRole('button', { name: '工作表2', exact: true })
+  await second.dragTo(first, { targetPosition: { x: 2, y: 10 } })
+  await expect.poll(() => page.evaluate(() => sheetNames())).toEqual(['工作表2', '工作表1'])
+  await expect(peer.locator('.colwork-workbook__tabs button').first()).toHaveText('工作表2')
+  await expect(peer.getByRole('button', { name: '工作表1', exact: true })).toHaveAttribute('aria-pressed', 'true')
+})

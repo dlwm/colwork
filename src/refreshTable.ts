@@ -1,5 +1,4 @@
 import type { Awareness } from 'y-protocols/awareness'
-import type { CellFormatting } from './formatting'
 import type { TableSelection } from './tableSelection'
 import { addCursorLabel, addSelectionOverlay } from './overlays'
 import { remoteSelectionRange, selectionRange, type AwarenessPosition, type AwarenessSelection } from './selection'
@@ -9,7 +8,7 @@ type RefreshView = {
   table: HTMLTableElement
   viewport: HTMLElement
   editingKey?: string
-  formatting: CellFormatting
+  applyStyle(element: HTMLElement, key: string): void
   selection: TableSelection
   awareness: Awareness
   sheet: SheetDocument
@@ -89,10 +88,10 @@ export function refreshCursors(view: RefreshView) {
 export function refreshStyles(view: RefreshView) {
     view.table.querySelectorAll<HTMLTableCellElement>('td[data-key]').forEach((cell) => {
       if (cell.dataset.key) {
-        view.formatting.applyStyle(cell, cell.dataset.key)
+        view.applyStyle(cell, cell.dataset.key)
         const value = cell.querySelector<HTMLElement>('.colwork-table__cell-value')
         if (value) {
-          view.formatting.applyStyle(value, cell.dataset.key)
+          view.applyStyle(value, cell.dataset.key)
           view.renderContent(value, cell.dataset.key)
         }
       }

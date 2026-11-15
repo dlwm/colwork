@@ -103,6 +103,23 @@ export class FormulaBook {
     return parts.length > 2048 ? value : marker + JSON.stringify(parts)
   }
 
+  shift(value: string, sheetId: string, rows: number, columns: number) {
+    if (!value.startsWith('=') && !value.startsWith(marker)) return value
+    const parts = decodeFormula(value) ?? (value.startsWith('=') ? this.bind(value.slice(1), sheetId) : undefined)
+    if (!parts) return value
+    return marker + JSON.stringify(parts.map(part => {
+      if (typeof part === 'string' || !part.key || !part.sheet) return part
+      const coordinates = this.sheet(part.sheet).coordinates
+      const position = coordinates.cellPosition(part.key)
+      if (!position) return part
+      const row = position.row + (part.rowAbsolute ? 0 : rows)
+      const column = position.column + (part.columnAbsolute ? 0 : columns)
+      const key = row >= 0 && row < 1048576 && column >= 0 && column < 16384
+        ? coordinates.cellId(cellKey({ row, column })) : undefined
+      return { ...part, key: key ?? '' }
+    }))
+  }
+
   source(value: string) {
     const parts = decodeFormula(value)
     if (!parts) return value.startsWith(marker) ? '=#VALUE!' : value
@@ -288,7 +305,93 @@ function binary(operator: string, left: Value, right: Value): Scalar {
   if (operator === '/') return y === 0 ? fail('#DIV/0!') : x / y
   return x ** y
 }
+function wildcardMatcher(pattern: string): (input: string) => boolean {
+  const tokens = [...pattern.matchAll(/~([*?~])|([*?])|([\s\S])/gu)].map(match =>
+    ({ literal: (match[1] ?? match[3])?.toLowerCase(), wildcard: match[2] }))
+  if (!tokens.some(token => token.wildcard)) {
+    const text = tokens.map(token => token.literal).join('')
+    return input => input.toLowerCase() === text
+  }
+  return input => {
+    const text = Array.from(input.toLowerCase())
+    let token = 0, index = 0, star = -1, retry = 0
+    while (index < text.length) {
+      if (tokens[token]?.wildcard === '*') { star = token++; retry = index }
+      else if (tokens[token]?.wildcard === '?' || tokens[token]?.literal === text[index]) { token++; index++ }
+      else if (star !== -1) { token = star + 1; index = ++retry }
+      else return false
+    }
+    while (tokens[token]?.wildcard === '*') token++
+    return token === tokens.length
+  }
+}
+
+function criteriaPredicate(criterion: Scalar): (value: Scalar) => boolean {
+  if (typeof criterion !== 'string') return value => (value ?? 0) === (criterion ?? 0)
+  const [, operator = '=', text = ''] = /^(<=|>=|<>|=|<|>)?(.*)$/s.exec(criterion) ?? []
+  const parsed = parseScalar(text)
+  if (operator !== '=' && operator !== '<>') return value => binary(operator, value, parsed) === true
+  const wildcard = /[*?~]/.test(text) ? wildcardMatcher(text) : undefined
+  return value => {
+    const equal = wildcard ? wildcard(String(value ?? ''))
+      : text === '' ? value === null || value === '' : binary('=', value, parsed) === true
+    return operator === '=' ? equal : !equal
+  }
+}
+
+function conditionalAggregate(name: string, args: Term[]): number {
+  const countOnly = name === 'COUNTIF' || name === 'COUNTIFS'
+  const single = name === 'COUNTIF' || name === 'SUMIF'
+  const values = args.map(arg => arg())
+  if (single ? values.length < 2 || values.length > (countOnly ? 2 : 3)
+    : values.length < (countOnly ? 2 : 3) || values.length % 2 !== (countOnly ? 0 : 1)) fail('#VALUE!')
+  const range = (value: Value) => Array.isArray(value) ? value : [value]
+  const sums = countOnly ? undefined : range(single ? values[2] ?? values[0] : values[0])
+  const conditions = single ? values.slice(0, 2) : countOnly ? values : values.slice(1)
+  const checks: Array<{ values: Scalar[]; matches: (value: Scalar) => boolean }> = []
+  const length = range(conditions[0]).length
+  for (let index = 0; index < conditions.length; index += 2) {
+    const values = range(conditions[index])
+    if (values.length !== length) fail('#VALUE!')
+    checks.push({ values, matches: criteriaPredicate(scalar(conditions[index + 1])) })
+  }
+  if (sums && sums.length !== length) fail('#VALUE!')
+  let total = 0
+  for (let index = 0; index < length; index++) {
+    if (!checks.every(check => check.matches(check.values[index]))) continue
+    const value = sums?.[index]
+    total += countOnly ? 1 : typeof value === 'number' ? value : 0
+  }
+  return total
+}
+
+function lookup(args: Term[]): Scalar {
+  if (args.length < 3 || args.length > 6) fail('#VALUE!')
+  const key = scalar(args[0]())
+  const keys = args[1](), results = args[2]()
+  if (!Array.isArray(keys) || !Array.isArray(results) || keys.length !== results.length) fail('#VALUE!')
+  const match = args[4] ? numeric(args[4]()) : 0
+  const search = args[5] ? numeric(args[5]()) : 1
+  if (![0, 2, -1, 1].includes(match) || ![1, -1, 2, -2].includes(search)) fail('#VALUE!')
+  const wildcard = match === 2 ? wildcardMatcher(String(key ?? '')) : undefined
+  let best = -1
+  for (let offset = 0; offset < keys.length; offset++) {
+    const index = search < 0 ? keys.length - offset - 1 : offset
+    const value = keys[index]
+    const equal = wildcard ? wildcard(String(value ?? '')) : binary('=', value, key) === true
+    if (equal) return results[index]
+    if (match !== 1 && match !== -1) continue
+    const direction = match === 1 ? '>' : '<'
+    if (binary(direction, value, key) && (best === -1 || binary(direction, keys[best], value))) best = index
+  }
+  if (best !== -1) return results[best]
+  return args[3] ? scalar(args[3]()) : fail('#N/A')
+}
+
 function call(name: string, args: Term[]): Scalar {
+  name = name.replace(/^_XLFN\./, '')
+  if (['SUMIF', 'SUMIFS', 'COUNTIF', 'COUNTIFS'].includes(name)) return conditionalAggregate(name, args)
+  if (name === 'XLOOKUP') return lookup(args)
   if (name === 'IF') {
     if (args.length < 2 || args.length > 3) fail('#VALUE!')
     return scalar(scalar(args[0]()) ? args[1]() : args[2]?.() ?? false)

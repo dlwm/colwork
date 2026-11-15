@@ -16,6 +16,7 @@ type ToolbarActions = {
   setFrozenPanes(rows: number, columns: number): unknown
   render(): void
   openRowView(): void
+  openFind(): void
   chooseImage?(): void
   setStyle(format: 'color' | 'background' | 'align' | 'fontSize' | 'format', value: string | number | undefined): void
   toggleFormat(format: BooleanStyleKey): void
@@ -71,6 +72,7 @@ export function buildToolbar(actions: ToolbarActions) {
       historyGroup.append(button)
     })
     const gridActions: Array<[string, string, () => void]> = [
+      ['查找替换', '查找', () => actions.openFind()],
       ['合并单元格', '合并', () => actions.mergeSelection()],
       ['拆分单元格', '拆分', () => actions.unmergeSelection()],
     ]

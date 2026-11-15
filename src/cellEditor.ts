@@ -12,6 +12,7 @@ type EditorHost = {
   applyStyle(element: HTMLElement, key: string): void
   renderContent(element: HTMLElement, key: string): void
   announce(cursor: CellPosition & { offset?: number }): void
+  move(vertical: number, horizontal: number): void
   focus(): CellPosition | undefined
   clearEditingPresence(): void
   refresh(): void
@@ -26,7 +27,7 @@ export class CellEditor {
   private original = ''
   constructor(private readonly host: EditorHost) {}
 
-  start(cell: HTMLTableCellElement, key: string, announce = true) {
+  start(cell: HTMLTableCellElement, key: string, announce = true, initial?: string) {
     if (!this.host.canEdit(key) || this.key === key) return
     this.finish(true)
     cell = this.host.table.querySelector<HTMLTableCellElement>(`td[data-key="${key}"]`) ?? cell
@@ -35,7 +36,7 @@ export class CellEditor {
     this.original = this.host.read(key) ?? ''
     const input = document.createElement('textarea')
     input.className = 'colwork-table__editor'
-    input.value = this.original
+    input.value = initial ?? this.original
     this.host.applyStyle(input, key)
     this.input = input
     cell.classList.add('is-editing')
@@ -45,11 +46,18 @@ export class CellEditor {
     this.host.changed({ editing: true, dirty: false })
     input.addEventListener('blur', () => this.finish(true), { once: true })
     input.addEventListener('keydown', event => {
-      if (event.key === 'Enter' && !event.ctrlKey && !event.shiftKey) input.blur()
-      if (event.key === 'Escape') this.finish(false)
+      if (event.isComposing) return
+      if ((event.key === 'Enter' && !event.ctrlKey && !event.shiftKey) || event.key === 'Tab') {
+        event.preventDefault()
+        event.stopPropagation()
+        this.finish(true)
+        this.host.move(event.key === 'Enter' ? 1 : 0, event.key === 'Tab' ? (event.shiftKey ? -1 : 1) : 0)
+      }
+      if (event.key === 'Escape') { event.stopPropagation(); this.finish(false) }
     })
     input.focus()
-    input.select()
+    if (initial === undefined) input.select()
+    else input.setSelectionRange(input.value.length, input.value.length)
   }
 
   finish(commit: boolean) {

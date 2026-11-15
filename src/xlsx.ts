@@ -1,12 +1,13 @@
 import type * as Y from 'yjs'
-import type { Cell, CellValue, RowModel, Worksheet, WorksheetModel } from 'exceljs'
-import { FormulaBook } from './formulas'
+import type { Cell, CellValue, ConditionalFormattingOptions, DataValidation, Image, RowModel, Worksheet, WorksheetModel } from 'exceljs'
+import { excelColumn, FormulaBook } from './formulas'
 import { getSheetMaps, readSheetSnapshot } from './model'
 import type { CellStyle } from './model-schema'
 import { mergeKey, parseCellKey } from './model-schema'
 import { SheetCoordinates } from './sheetCoordinates'
-import { imageLabel, readCellImage } from './cellImage'
+import { encodeCellImage, imageLabel, readCellImage, type ColworkImageRef } from './cellImage'
 import { cellKey, type CellPosition, type CellRange } from './range'
+import { getSheetFeatureMaps, isConditionalFormat, isDataValidation, readFeature, type ColworkConditionalFormat, type ColworkDataValidation } from './sheetFeatures'
 import { listWorkbookSheets, MAIN_SHEET_ID, makeSheetId, normalizeSheetName, workbookOrderRoot, workbookRoot } from './workbookModel'
 
 const maxRows = 100000
@@ -19,12 +20,25 @@ const maxMergeArea = 10000
 const maxMerges = 1000
 const borderSides = ['top', 'right', 'bottom', 'left'] as const
 const numberFormats = { general: 'General', number: '#,##0.########', date: 'yyyy-mm-dd', percent: '0.00%' } as const
-export type XlsxImportOptions = { replaceBlankMain?: boolean; canApply?: () => boolean }
+export type ColworkXlsxImage = { bytes: Uint8Array; mimeType: string }
+export type XlsxImportOptions = {
+  replaceBlankMain?: boolean
+  canApply?: () => boolean
+  uploadImage?: (image: ColworkXlsxImage & { name: string }) => Promise<ColworkImageRef>
+}
+export type XlsxExportOptions = {
+  readImage?: (image: ColworkImageRef) => Promise<ColworkXlsxImage | undefined>
+}
+const imageMime = { png: 'image/png', jpeg: 'image/jpeg', gif: 'image/gif' } as const
+const maxXlsxImages = 300
 
 type ImportCell = { key: string; value: string; formula: boolean; style: CellStyle }
 type ImportSheet = {
   name: string; cells: ImportCell[]; merges: CellRange[]
   rowHeights: Array<[string, number]>; columnWidths: Array<[string, number]>
+  validation: Array<[string, ColworkDataValidation]>
+  conditional: Array<[string, ColworkConditionalFormat]>
+  imageRefs: Map<string, string>
 }
 
 function parseAddress(address: string): CellPosition {
@@ -36,11 +50,11 @@ function parseAddress(address: string): CellPosition {
   return { row, column }
 }
 
-function parseMerge(value: string): CellRange {
+function parseMerge(value: string, area = maxMergeArea): CellRange {
   const [left, right, extra] = value.split(':')
-  if (!left || !right || extra !== undefined) throw new Error('Excel 合并区域无效')
-  const start = parseAddress(left), end = parseAddress(right)
-  if (start.row > end.row || start.column > end.column || (end.row - start.row + 1) * (end.column - start.column + 1) > maxMergeArea) {
+  if (!left || right === '' || extra !== undefined) throw new Error('Excel 合并区域无效')
+  const start = parseAddress(left), end = parseAddress(right ?? left)
+  if (start.row > end.row || start.column > end.column || (end.row - start.row + 1) * (end.column - start.column + 1) > area) {
     throw new RangeError('Excel 合并区域过大或无效')
   }
   return { start, end }
@@ -95,6 +109,7 @@ async function preflight(bytes: ArrayBuffer) {
   let cellCount = 0
   let mergeCount = 0
   let mergeArea = 0
+  let validationArea = 0
   let normalized = false
   const normalize = (name: string, xml: string) => {
     const compatible = normalizeSpreadsheetXml(xml)
@@ -113,6 +128,13 @@ async function preflight(bytes: ArrayBuffer) {
       const { start, end } = parseMerge(match[1])
       mergeArea += (end.row - start.row + 1) * (end.column - start.column + 1)
       if (++mergeCount > maxMerges || mergeArea > maxCells) throw new RangeError('Excel 合并区域过多')
+    }
+    for (const match of xml.matchAll(/<(?:[\w.-]+:)?dataValidation\b[^>]*\bsqref\s*=\s*["']([^"']+)["']/gi)) {
+      for (const address of match[1].trim().split(/\s+/)) {
+        const { start, end } = parseMerge(address, maxCells)
+        validationArea += (end.row - start.row + 1) * (end.column - start.column + 1)
+        if (validationArea > maxCells) throw new RangeError('Excel 数据验证覆盖范围过大')
+      }
     }
     normalize(file.name, xml)
   }
@@ -169,6 +191,43 @@ function readValue(cell: Cell): Pick<ImportCell, 'value' | 'formula'> {
   return { value: text.startsWith('=') ? "'" + text : text, formula: false }
 }
 
+function readValidationRules(rules: Record<string, DataValidation>): ImportSheet['validation'] {
+  const byRule = new Map<string, { rule: ColworkDataValidation; positions: CellPosition[] }>()
+  for (const [address, rule] of Object.entries(rules)) {
+    const formula = rule.formulae?.[0]
+    if (rule.type !== 'list' || typeof formula !== 'string' || !/^"[^"]*"$/.test(formula)) continue
+    let group = byRule.get(formula)
+    if (!group) {
+      const definition = { choices: [...new Set(formula.slice(1, -1).split(','))] }
+      if (!isDataValidation(definition)) continue
+      group = { rule: definition, positions: [] }
+      byRule.set(formula, group)
+    }
+    group.positions.push(parseAddress(address))
+  }
+  const result: ImportSheet['validation'] = []
+  for (const { rule, positions } of byRule.values()) {
+    positions.sort((a, b) => a.row - b.row || a.column - b.column)
+    const ranges: CellRange[] = []
+    const previousBySpan = new Map<string, CellRange>()
+    for (let index = 0; index < positions.length;) {
+      const start = positions[index++]
+      let end = start
+      while (positions[index]?.row === start.row && positions[index].column === end.column + 1) end = positions[index++]
+      const span = `${start.column}:${end.column}`
+      const previous = previousBySpan.get(span)
+      if (previous && previous.end.row + 1 === start.row) previous.end = end
+      else {
+        const range = { start, end }
+        previousBySpan.set(span, range)
+        ranges.push(range)
+      }
+    }
+    for (const range of ranges) result.push([mergeKey(range), rule])
+  }
+  return result
+}
+
 function readWorksheet(sheet: Worksheet): ImportSheet {
   // ExcelJS exposes sparse rows with string addresses in its runtime model.
   const { rows, merges } = sheet.model as WorksheetModel & { rows: Array<Omit<RowModel, 'cells'> & { cells: Array<{ address: string }> }> }
@@ -193,7 +252,36 @@ function readWorksheet(sheet: Worksheet): ImportSheet {
     if (number !== undefined && number > maxColumns) throw new RangeError('Excel 工作表列数超出限制')
     if (column.isCustomWidth && number && width && width > 0) columnWidths.push([String(number - 1), width * 7 + 5])
   }
-  return { name: normalizeSheetName(sheet.name), cells, merges: merges.map(parseMerge), rowHeights, columnWidths }
+  const model = sheet.model as WorksheetModel & {
+    dataValidations?: Record<string, DataValidation>
+    conditionalFormattings?: ConditionalFormattingOptions[]
+  }
+  const validation = readValidationRules(model.dataValidations ?? {})
+  const conditional: ImportSheet['conditional'] = []
+  for (const group of model.conditionalFormattings ?? []) {
+    for (const rule of group.rules) {
+      const fill = rule.style?.fill
+      if (fill?.type !== 'pattern' || fill.pattern !== 'solid') continue
+      const background = toCss(fill.fgColor?.argb)
+      let operator: ColworkConditionalFormat['operator']
+      let value: string
+      if (rule.type === 'containsText' && rule.operator === 'containsText') { operator = 'contains'; value = rule.text ?? '' }
+      else if (rule.type === 'containsText' && rule.operator === 'containsBlanks') { operator = 'empty'; value = '' }
+      else if (rule.type === 'cellIs' && ['equal', 'greaterThan', 'lessThan'].includes(rule.operator ?? '')) {
+        operator = rule.operator === 'equal' ? 'equals' : rule.operator === 'greaterThan' ? 'greater' : 'less'
+        const expression = String(rule.formulae?.[0] ?? '')
+        if (/^"(?:""|[^"])*"$/.test(expression)) value = expression.slice(1, -1).replace(/""/g, '"')
+        else if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(expression)) value = expression
+        else continue
+      } else continue
+      const definition = { operator, value, background }
+      if (!isConditionalFormat(definition)) continue
+      for (const address of group.ref.trim().split(/\s+/)) conditional.push([mergeKey(parseMerge(address, maxRows * maxColumns)), definition])
+      break
+    }
+  }
+  return { name: normalizeSheetName(sheet.name), cells, merges: merges.map(value => parseMerge(value)), rowHeights, columnWidths,
+    conditional, validation, imageRefs: new Map() }
 }
 
 /** Imports a workbook into the shared Y.Doc in one transaction. Existing sheets are preserved. */
@@ -205,11 +293,37 @@ export async function importXlsx(document: Y.Doc, input: ArrayBuffer, options: X
   if (!workbook.worksheets.length || workbook.worksheets.length > maxSheets) throw new RangeError('Excel 工作表数量无效')
   const sheets = workbook.worksheets.map(readWorksheet)
   if (sheets.reduce((total, sheet) => total + sheet.cells.length, 0) > maxCells) throw new RangeError('Excel 最多导入十万个单元格')
+  if (options.uploadImage) {
+    const distinct = new Map<number, ColworkImageRef>()
+    let anchors = 0
+    for (const [index, sheet] of workbook.worksheets.entries()) {
+      for (const drawing of sheet.getImages()) {
+        if (++anchors > maxXlsxImages) throw new RangeError('Excel 最多导入 300 张图片')
+        if (options.canApply && !options.canApply()) throw new Error('当前无法编辑工作簿，导入已取消')
+        const row = drawing.range.tl.nativeRow, column = drawing.range.tl.nativeCol
+        if (!Number.isSafeInteger(row) || !Number.isSafeInteger(column) || row < 0 || column < 0 || row >= maxRows || column >= maxColumns) continue
+        const source = Number(drawing.imageId)
+        const image = workbook.getImage(source)
+        if (!image?.buffer || !Object.prototype.hasOwnProperty.call(imageMime, image.extension)) continue
+        const target = { row, column }
+        const merge = sheets[index].merges.find(({ start, end }) =>
+          row >= start.row && row <= end.row && column >= start.column && column <= end.column)
+        const key = cellKey(merge?.start ?? target)
+        if (sheets[index].imageRefs.has(key)) continue
+        let ref = distinct.get(source)
+        if (!ref) {
+          ref = await options.uploadImage({ bytes: Uint8Array.from(image.buffer as unknown as Uint8Array), mimeType: imageMime[image.extension], name: `image-${source + 1}.${image.extension}` })
+          distinct.set(source, ref)
+        }
+        sheets[index].imageRefs.set(key, encodeCellImage(ref))
+      }
+    }
+  }
   if (options.canApply && !options.canApply()) throw new Error('当前无法编辑工作簿，导入已取消')
   const existing = listWorkbookSheets(document)
   const mayReplaceBlank = options.replaceBlankMain && existing.length === 1 && existing[0].id === MAIN_SHEET_ID && existing[0].name === '工作表1'
   const main = mayReplaceBlank ? readSheetSnapshot(document) : undefined
-  const replaceBlank = main && main.rowCount === 1 && main.columnCount === 1 && !Object.values(getSheetMaps(document)).some(map => map.size)
+  const replaceBlank = main && main.rowCount === 1 && main.columnCount === 1 && ![...Object.values(getSheetMaps(document)), ...Object.values(getSheetFeatureMaps(document))].some(map => map.size)
   const names = new Set((replaceBlank ? [] : existing).map(sheet => sheet.name.toLowerCase()))
   const imports = sheets.map((sheet, index) => {
     const base = sheet.name
@@ -236,6 +350,10 @@ export async function importXlsx(document: Y.Doc, input: ArrayBuffer, options: X
       for (const [key, value] of sheet.rowHeights) maps.rowHeights.set(key, value)
       for (const [key, value] of sheet.columnWidths) maps.columnWidths.set(key, value)
       for (const range of sheet.merges) maps.merges.set(mergeKey(range), '1')
+      for (const [key, image] of sheet.imageRefs) maps.cells.set(key, image)
+      const features = getSheetFeatureMaps(document, id)
+      for (const [range, rule] of sheet.validation) features.validation.set(range, JSON.stringify(rule))
+      for (const [range, rule] of sheet.conditional) features.conditional.set(range, JSON.stringify(rule))
     }
   })
   return imports.map(sheet => sheet.id)
@@ -267,7 +385,7 @@ function writeValue(value: string, style: CellStyle | undefined, result: string 
 }
 
 /** Exports the shared workbook in canonical row order. Hosts authorize file access. */
-export async function exportXlsx(document: Y.Doc): Promise<Uint8Array> {
+export async function exportXlsx(document: Y.Doc, options: XlsxExportOptions = {}): Promise<Uint8Array> {
   const { default: ExcelJS } = await import('exceljs')
   const workbook = new ExcelJS.Workbook()
   workbook.calcProperties.fullCalcOnLoad = true
@@ -275,13 +393,23 @@ export async function exportXlsx(document: Y.Doc): Promise<Uint8Array> {
   if (sheets.length > maxSheets) throw new RangeError('Excel 最多支持 32 张工作表')
   const formulas = new FormulaBook(document)
   let totalCells = 0
-  for (const { id, name } of sheets) {
+  let imageCount = 0
+  const images = new Map<string, number | undefined>()
+  // Snapshot the source before asynchronous asset retrieval can yield to collaboration updates.
+  const sourceSheets = sheets.map(sheet => ({
+    ...sheet, snapshot: readSheetSnapshot(document, { maxRows, maxColumns, maxMerges, maxMergeArea }, sheet.id),
+    coordinates: new SheetCoordinates(document, sheet.id), features: getSheetFeatureMaps(document, sheet.id),
+  })).map(sheet => ({
+    ...sheet, validation: [...sheet.features.validation].map(([key, value]) => [sheet.coordinates.mergeRange(key), value] as const),
+    conditional: [...sheet.features.conditional].map(([key, value]) => [sheet.coordinates.mergeRange(key), value] as const),
+    values: new Map(Object.entries(sheet.snapshot.cells).filter(([, raw]) => raw.startsWith('=')).map(([key]) =>
+      [key, formulas.value(sheet.id, sheet.coordinates.cellId(key)!)])),
+  }))
+  for (const { name, snapshot, validation, conditional, values } of sourceSheets) {
     const sheet = workbook.addWorksheet(name)
-    const snapshot = readSheetSnapshot(document, { maxRows, maxColumns, maxMerges, maxMergeArea }, id)
     const keys = new Set([...Object.keys(snapshot.cells), ...Object.keys(snapshot.styles)])
     totalCells += keys.size
     if (totalCells > maxCells) throw new RangeError('Excel 最多导出十万个单元格')
-    const coordinates = new SheetCoordinates(document, id)
     for (const key of keys) {
       const { row, column } = parseCellKey(key)!
       const cell = sheet.getCell(row + 1, column + 1)
@@ -289,12 +417,62 @@ export async function exportXlsx(document: Y.Doc): Promise<Uint8Array> {
       const raw = snapshot.cells[key]
       const image = readCellImage(raw)
       const value = image ? undefined : raw
-      if (image) cell.value = imageLabel(image)
+      if (image) {
+        cell.value = imageLabel(image)
+        if (options.readImage) {
+          if (++imageCount > maxXlsxImages) throw new RangeError('Excel 最多导出 300 张图片')
+          if (!images.has(image.id)) {
+            const asset = await options.readImage(image)
+            const extension = asset && (Object.keys(imageMime) as Image['extension'][]).find(type => imageMime[type] === asset.mimeType)
+            images.set(image.id, asset && extension
+              ? workbook.addImage({ extension, buffer: Uint8Array.from(asset.bytes) as unknown as Image['buffer'] }) : undefined)
+          }
+          const imageId = images.get(image.id)
+          if (imageId !== undefined) {
+            const merge = snapshot.merges.find(range => range.start.row === row && range.start.column === column)
+            const end = merge?.end ?? { row, column }
+            sheet.addImage(imageId, `${excelColumn(column)}${row + 1}:${excelColumn(end.column)}${end.row + 1}`)
+          }
+        }
+      }
       if (value !== undefined) {
         if (value.length > 32767) throw new RangeError('Excel 单元格文本最多 32767 个字符')
-        cell.value = writeValue(value, style, value.startsWith('=') ? formulas.value(id, coordinates.cellId(key)!) : null)
+        cell.value = writeValue(value, style, values.get(key) ?? null)
       }
       if (style) writeStyle(cell, style)
+    }
+    const excelAddress = (row: number, column: number) => excelColumn(column) + (row + 1)
+    let validated = 0
+    for (const [range, raw] of validation) {
+      const rule = readFeature(raw, isDataValidation)
+      if (!rule || !range || rule.choices.some(choice => /[,"\r\n]/.test(choice))) continue
+      const formula = '"' + rule.choices.join(',') + '"'
+      if (formula.length > 255) continue
+      validated += (range.end.row - range.start.row + 1) * (range.end.column - range.start.column + 1)
+      if (validated > maxCells) throw new RangeError('Excel 数据验证覆盖范围过大')
+      const cells = (sheet as Worksheet & { dataValidations: { add(address: string, rule: DataValidation): void } }).dataValidations
+      for (let row = range.start.row; row <= range.end.row; row++) {
+        for (let column = range.start.column; column <= range.end.column; column++) {
+          cells.add(excelAddress(row, column), { type: 'list', allowBlank: true, showErrorMessage: true, formulae: [formula] })
+        }
+      }
+    }
+    let priority = 0
+    for (const [range, raw] of conditional) {
+      const rule = readFeature(raw, isConditionalFormat)
+      if (!range || !rule) continue
+      const ref = `${excelAddress(range.start.row, range.start.column)}:${excelAddress(range.end.row, range.end.column)}`
+      const style = { fill: { type: 'pattern' as const, pattern: 'solid' as const, fgColor: { argb: toArgb(rule.background) } } }
+      const base = { priority: ++priority, style }
+      if (rule.operator === 'contains' || rule.operator === 'empty') {
+        sheet.addConditionalFormatting({ ref, rules: [{ ...base, type: 'containsText',
+          operator: rule.operator === 'empty' ? 'containsBlanks' : 'containsText', text: rule.value }] })
+      } else {
+        const operator = rule.operator === 'greater' ? 'greaterThan' : rule.operator === 'less' ? 'lessThan' : 'equal'
+        const value = rule.operator === 'equals' && (!rule.value.trim() || !Number.isFinite(Number(rule.value)))
+          ? '"' + rule.value.replace(/"/g, '""') + '"' : Number(rule.value)
+        sheet.addConditionalFormatting({ ref, rules: [{ ...base, type: 'cellIs', operator, formulae: [value] }] })
+      }
     }
     for (const [key, height] of Object.entries(snapshot.rowHeights)) sheet.getRow(Number(key) + 1).height = height * 3 / 4
     for (const [key, width] of Object.entries(snapshot.columnWidths)) sheet.getColumn(Number(key) + 1).width = Math.max(1, (width - 5) / 7)

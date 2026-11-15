@@ -39,16 +39,20 @@ export function createPresence(clientID, broadcast) {
   return state
 }
 
-export function receiveMessage(doc, state, socket, message) {
+export function receiveMessage(doc, state, socket, message, send = bytes => socket.send(bytes)) {
   if (typeof message === 'string') throw new Error('Expected binary Yjs protocol')
-  const decoder = decoding.createDecoder(new Uint8Array(message))
+  const decoder = decoding.createDecoder(message instanceof Uint8Array ? message : new Uint8Array(message))
   const type = decoding.readVarUint(decoder)
   if (type === 0) {
-    if (socket.deserializeAttachment()?.canWrite === false && decoding.peekVarUint(decoder) !== sync.messageYjsSyncStep1) return
-    const response = encoding.createEncoder()
-    encoding.writeVarUint(response, 0)
-    sync.readSyncMessage(decoder, response, doc, socket)
-    if (encoding.length(response) > 1) socket.send(encoding.toUint8Array(response))
+    const subtype = decoding.readVarUint(decoder)
+    if (subtype === sync.messageYjsSyncStep1) {
+      const response = encoding.createEncoder()
+      encoding.writeVarUint(response, 0)
+      sync.readSyncStep1(decoder, response, doc)
+      send(encoding.toUint8Array(response))
+    } else if (subtype === sync.messageYjsSyncStep2 || subtype === sync.messageYjsUpdate) {
+      if (socket.deserializeAttachment()?.canWrite !== false) Y.applyUpdate(doc, decoding.readVarUint8Array(decoder), socket)
+    } else throw new Error('Unknown Yjs sync message')
   } else if (type === 1) {
     const update = decoding.readVarUint8Array(decoder)
     const reader = decoding.createDecoder(update)

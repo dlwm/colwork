@@ -1,6 +1,6 @@
 import { ColworkTable } from './ColworkTable'
 import type { ColworkRowView, ColworkViewPolicy, ExternalCollaborationOptions } from './options'
-import { addWorkbookSheet, listWorkbookSheets, removeWorkbookSheet, setWorkbookSheetName, workbookOrderRoot, workbookRoot } from './workbookModel'
+import { addWorkbookSheet, listWorkbookSheets, moveWorkbookSheet, removeWorkbookSheet, setWorkbookSheetName, workbookOrderRoot, workbookRoot } from './workbookModel'
 
 export type ColworkWorkbookOptions = Omit<ExternalCollaborationOptions, 'transport' | 'sheetId'>
 
@@ -11,6 +11,7 @@ export class ColworkWorkbook {
   private readonly status: HTMLElement
   private readonly document
   private readonly views = new Map<string, ColworkRowView>()
+  private draggedSheet?: string
   private table?: ColworkTable
   private sheetId?: string
   private readOnly: boolean
@@ -54,6 +55,32 @@ export class ColworkWorkbook {
     for (const sheet of sheets) {
       const item = button(sheet.name, () => this.setActiveSheet(sheet.id))
       item.setAttribute('aria-pressed', String(sheet.id === this.sheetId))
+      if (this.readOnly) continue
+      item.draggable = true
+      item.ondragstart = event => {
+        this.draggedSheet = sheet.id
+        event.dataTransfer?.setData('text/plain', sheet.name)
+      }
+      item.ondragend = () => { this.draggedSheet = undefined }
+      item.ondragover = event => { if (this.draggedSheet) event.preventDefault() }
+      item.ondrop = event => {
+        event.preventDefault()
+        const id = this.draggedSheet
+        this.draggedSheet = undefined
+        if (!id || id === sheet.id || this.readOnly || !listWorkbookSheets(this.document).some(tab => tab.id === id)) return
+        const remaining = listWorkbookSheets(this.document).filter(tab => tab.id !== id)
+        const after = event.clientX > item.getBoundingClientRect().left + item.offsetWidth / 2
+        const index = remaining.findIndex(tab => tab.id === sheet.id)
+        moveWorkbookSheet(this.document, id, after ? remaining[index + 1]?.id : sheet.id)
+      }
+      item.onkeydown = event => {
+        if (!event.altKey || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return
+        event.preventDefault()
+        const index = sheets.indexOf(sheet)
+        if (event.key === 'ArrowLeft' && index > 0) moveWorkbookSheet(this.document, sheet.id, sheets[index - 1].id)
+        if (event.key === 'ArrowRight' && index < sheets.length - 1) moveWorkbookSheet(this.document, sheet.id, sheets[index + 2]?.id)
+        this.tabs.querySelectorAll('button')[listWorkbookSheets(this.document).findIndex(tab => tab.id === sheet.id)]?.focus()
+      }
     }
     if (this.readOnly) button('排序筛选', () => this.table?.openRowView())
     else {
@@ -77,7 +104,7 @@ export class ColworkWorkbook {
   private mount(id: string, commit: boolean) {
     if (this.table && this.sheetId) {
       if (commit) this.table.commitEditing()
-      this.views.set(this.sheetId, this.table.getRowView())
+      if (!this.options.personalViewKey) this.views.set(this.sheetId, this.table.getRowView())
       this.table.destroy()
     }
     this.options.onEditingChange?.({ editing: false, dirty: false })
@@ -112,6 +139,7 @@ export class ColworkWorkbook {
     this.table?.setViewPolicy(policy)
   }
 
+  openVersionHistory() { this.table?.openVersionHistory() }
   commitEditing() { this.table?.commitEditing() }
   canExport() { return this.table?.canExport() ?? false }
 

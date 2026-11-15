@@ -58,7 +58,7 @@ const App = defineComponent({
     }
     const mountTable = () => {
       table?.destroy()
-      if (tableRoot.value) table = new ColworkTable(tableRoot.value, { room: 'colwork-demo', user: applied.value.nickname, userColor: applied.value.color, transport, initializeAfterSync: cloudflareDeployment, websocketUrl: websocketUrl(applied.value), onLog: appendLog, viewPolicy: demoViewPolicy(applied.value.nickname), images: demoImages })
+      if (tableRoot.value) table = new ColworkTable(tableRoot.value, { room: 'colwork-demo', user: applied.value.nickname, userColor: applied.value.color, transport, initializeAfterSync: cloudflareDeployment, websocketChunks: cloudflareDeployment, websocketUrl: websocketUrl(applied.value), onLog: appendLog, viewPolicy: demoViewPolicy(applied.value.nickname), images: demoImages })
     }
     const applySettings = async () => {
       applied.value = { ...draft.value, delay: Math.max(0, Math.min(30000, Number(draft.value.delay) || 0)) }

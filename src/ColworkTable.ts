@@ -18,11 +18,19 @@ import { buildToolbar } from './toolbar'
 import { renderTable } from './renderTable'
 import { CellFormatting } from './formatting'
 import { TableWatermark } from './tableWatermark'
-import type { ProjectedMap, SheetCoordinates } from './sheetCoordinates'
+import { SheetCoordinates, type ProjectedMap } from './sheetCoordinates'
 import { parseCellKey } from './model-schema'
 import { openRowViewDialog } from './rowViewDialog'
 import { encodeCellImage, readCellImage } from './cellImage'
 import { renderCellContent } from './cellContent'
+import { VersionHistoryDialog } from './versionHistory'
+import { openFindReplace } from './findReplace'
+import { excelColumn } from './formulas'
+import { getViewportOffset } from './viewport'
+import { normalizeCellText } from './unicode'
+import { openAnalysisDialog, openRuleDialog } from './dataTools'
+import { isAnalysis, isConditionalFormat, isDataValidation, readFeature } from './sheetFeatures'
+import { makeSheetId } from './workbookModel'
 import { createPasswordLock, verifyPasswordLock } from './passwordLock'
 import * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
@@ -39,7 +47,17 @@ export class ColworkTable {
   private readonly sheet: SheetDocument
   private axes: SheetCoordinates['axes']
   private rowView: ColworkRowView = {}
+  private restoringRowView = false
+  private pendingRowView = false
   private rowViewDialog?: HTMLDialogElement
+  private findDialog?: HTMLDialogElement
+  private dataDialog?: HTMLDialogElement
+  private readonly validationButton: HTMLButtonElement
+  private readonly versionDialog?: VersionHistoryDialog
+  private readonly formulaInput: HTMLInputElement
+  private readonly formulaAddress: HTMLElement
+  private formulaDraft?: { id: string; value: string; raw?: string }
+  private fill?: { source: CellRange; target: CellPosition }
   private readonly imageUploads = new Map<string, symbol>()
   private imagePicker?: HTMLInputElement
   private readonly cells: ProjectedMap<string>
@@ -96,6 +114,11 @@ export class ColworkTable {
       else this.refreshValues()
     }
   }
+  private readonly onFeatureChange = () => {
+    if (this.sheet.coordinates.hasRowOrder) { this.refreshRowOrder(); this.render() }
+    else if (this.expandLogicalSizeFromDocument()) this.render()
+    else this.refreshStyles()
+  }
   private readonly onSizesChange = () => this.render()
   private readonly onMergesChange = () => {
     if (this.axes !== this.sheet.coordinates.axes) return
@@ -126,6 +149,7 @@ export class ColworkTable {
         }),
       }
       try { this.sheet.applyRowView(this.rowView) } catch { this.rowView = {}; this.sheet.applyRowView({}) }
+      this.savePersonalView()
     }
     this.dimensions.rows = Math.max(1, this.dimensions.rows + next.row.delta - previous.row.delta)
     this.dimensions.columns = Math.max(1, this.dimensions.columns + next.column.delta - previous.column.delta)
@@ -158,10 +182,12 @@ export class ColworkTable {
     this.editEpoch++
     this.resizing = undefined
     this.viewport.classList.remove('is-resizing')
+    this.cancelFill()
     this.pointer.cancel()
     this.menu.hide()
     this.dialogs.close()
     this.render()
+    if (this.pendingRowView) this.loadPersonalView()
     if (selection.focus) selection.sendAwareness(selection.focus)
     else if (wasOrdered) selection.updateAwareness({ cursor: undefined, editing: null })
   }
@@ -198,26 +224,81 @@ export class ColworkTable {
     this.render()
   }
   private readonly onViewportKeyDown = (event: KeyboardEvent) => {
-    if (this.readOnly || this.editing.input) return
+    if (this.editing.input || event.isComposing || event.defaultPrevented) return
     const modifier = event.ctrlKey || event.metaKey
-    if (modifier && event.key.toLowerCase() === 'z') {
-      event.preventDefault()
-      if (event.shiftKey) this.redo()
-      else this.undo()
+    const key = event.key.toLowerCase()
+    if (modifier) {
+      if (key === 'f' || key === 'h') {
+        event.preventDefault()
+        this.openFind()
+      } else if (!this.readOnly && (key === 'z' || key === 'y')) {
+        event.preventDefault()
+        if (key === 'y' || event.shiftKey) this.redo()
+        else this.undo()
+      }
       return
     }
-    if (modifier && event.key.toLowerCase() === 'y') {
+    const movement: Record<string, [number, number]> = {
+      ArrowUp: [-1, 0], ArrowDown: [1, 0], ArrowLeft: [0, -1], ArrowRight: [0, 1],
+      Enter: [event.shiftKey ? -1 : 1, 0], Tab: [0, event.shiftKey ? -1 : 1],
+    }
+    const direction = movement[event.key]
+    if (direction) {
       event.preventDefault()
-      this.redo()
+      this.moveSelection(...direction, event.shiftKey && event.key.startsWith('Arrow'), event.key === 'Tab')
       return
     }
-    if (event.key !== ' ' || !this.selection.focus) return
-    const key = `${this.selection.focus.row}:${this.selection.focus.column}`
-    const cell = this.table.querySelector<HTMLTableCellElement>(`td[data-key="${key}"]`)
+    if (this.readOnly || !this.selection.focus || event.altKey) return
+    if (event.key === 'Delete' || event.key === 'Backspace') {
+      event.preventDefault()
+      this.clearSelectionContents()
+      return
+    }
+    const start = event.key === ' ' || event.key === 'F2'
+    if (!start && event.key.length !== 1) return
+    const position = this.selectedImagePosition()!
+    const cell = this.table.querySelector<HTMLTableCellElement>(`td[data-key="${cellKey(position)}"]`)
     if (!cell) return
     event.preventDefault()
-    this.editing.start(cell, key)
+    this.editing.start(cell, cellKey(position), true, start ? undefined : event.key)
   }
+
+  private moveSelection(vertical: number, horizontal: number, extend = false, wrap = false) {
+    const current = (extend ? this.selection.focus : this.selectedImagePosition()) ?? { row: 0, column: 0 }
+    const merge = this.sheet.getMergeRanges().find(range => containsPosition(range, current))
+    const row = current.row + vertical
+    let nextRow = vertical && merge ? (vertical > 0 ? merge.end.row + 1 : merge.start.row - 1) : row
+    let nextColumn = horizontal && merge
+      ? (horizontal > 0 ? merge.end.column + 1 : merge.start.column - 1) : current.column + horizontal
+    if (wrap && nextColumn >= this.columnCount && nextRow < this.rowCount - 1) { nextColumn = 0; nextRow++ }
+    if (wrap && nextColumn < 0 && nextRow > 0) { nextColumn = this.columnCount - 1; nextRow-- }
+    this.navigateTo({
+      row: Math.max(0, Math.min(this.rowCount - 1, nextRow)),
+      column: Math.max(0, Math.min(this.columnCount - 1, nextColumn)),
+    }, extend)
+  }
+
+  private navigateTo(position: CellPosition, extend = false) {
+    const merge = this.sheet.getMergeRanges().find(range => containsPosition(range, position))
+    if (merge && !extend) position = merge.start
+    this.selection.selectCell(position.row, position.column, extend)
+    const scroll = (index: number, frozen: number, current: number, available: number, header: number, size: (index: number) => number) => {
+      if (index < frozen) return current
+      const start = getViewportOffset(index, size)
+      const pinned = getViewportOffset(frozen, size)
+      const end = start + size(index)
+      if (start < current + pinned || size(index) > available - header - pinned) return Math.max(0, start - pinned)
+      return Math.max(current, end - available + header)
+    }
+    const top = scroll(position.row, this.frozenRows, this.viewport.scrollTop, this.viewport.clientHeight, this.columnHeaderHeight, row => this.getRowHeight(row))
+    const left = scroll(position.column, this.frozenColumns, this.viewport.scrollLeft, this.viewport.clientWidth, this.rowHeaderWidth, column => this.getColumnWidth(column))
+    if (top !== this.viewport.scrollTop || left !== this.viewport.scrollLeft) {
+      this.viewport.scrollTo(left, top)
+      this.render()
+    } else this.refreshSelection()
+    if (this.selection.pendingCursor) this.selection.sendAwareness(this.selection.pendingCursor)
+  }
+
   private readonly onTableMouseDown = (event: MouseEvent) => {
     if ((event.target as HTMLElement).closest('th')) event.preventDefault()
   }
@@ -225,6 +306,14 @@ export class ColworkTable {
     if (!this.menu.contains(event.target as Node) && !this.protectionMenuButton?.contains(event.target as Node)) this.menu.hide()
   }
   private readonly onWindowMouseUp = (event: MouseEvent) => {
+    if (this.fill) {
+      this.updateFillTarget(event)
+      const { source, target } = this.fill
+      this.fill = undefined
+      this.viewport.classList.remove('is-filling')
+      this.fillSelection(source, target)
+      return
+    }
     if (this.resizing) {
       const resize = this.resizing
       this.doc.transact(() => {
@@ -237,8 +326,12 @@ export class ColworkTable {
     }
     this.pointer.release(event)
   }
-  private readonly onWindowBlur = () => this.pointer.blur()
+  private readonly onWindowBlur = () => {
+    this.cancelFill()
+    this.pointer.blur()
+  }
   private readonly onWindowMouseMove = (event: MouseEvent) => {
+    if (this.fill) { this.updateFillTarget(event); return }
     if (this.pointer.headerSelecting && !(event.buttons & 1)) this.onWindowBlur()
     if (!this.resizing) return
     const delta = this.resizing.axis === 'row' ? event.clientY - this.resizing.start : event.clientX - this.resizing.start
@@ -286,7 +379,7 @@ export class ColworkTable {
     })
     const useWebrtc = options.transport === 'webrtc'
     this.log(`room:${options.room}`)
-    this.archive = new DocumentArchive(this.sheet, this.awareness, this.provider, options.room, message => this.log(message), !!options.onLog)
+    this.archive = new DocumentArchive(this.sheet, this.awareness, this.provider, options.room, message => this.log(message), !!options.onLog, options.recordUpdateLog ?? !options.versionHistory)
     this.awareness.on('change', this.onAwarenessChange)
     if (useWebrtc && this.provider) this.archive.inspectConnections()
 
@@ -307,10 +400,14 @@ export class ColworkTable {
     this.editing = new CellEditor({
       id: key => this.sheet.coordinates.cellId(key), position: id => this.sheet.coordinates.cellKey(id),
       table: this.table, canEdit: key => !this.readOnly && !this.destroyed && !this.sheet.isCellLocked(key),
-      read: key => this.sheet.readCell(key), write: (key, value) => this.doc.transact(() => this.sheet.writeCell(key, value), this),
-      applyStyle: (element, key) => this.formatting.applyStyle(element, key), renderContent: this.renderContent,
+      read: key => this.sheet.readCell(key), write: (key, value) => this.writeInput(key, value),
+      applyStyle: this.applyCellStyle, renderContent: this.renderContent,
       announce: cursor => this.selection.sendAwareness(cursor), focus: () => this.selection.focus,
       clearEditingPresence: () => { if (!this.destroyed) this.session.finishEditing() },
+      move: (vertical, horizontal) => {
+        this.viewport.focus({ preventScroll: true })
+        this.moveSelection(vertical, horizontal, false, horizontal !== 0)
+      },
       changed: state => this.options.onEditingChange?.(state),
       refresh: () => { this.refreshSelection(); this.refreshCursors() }, render: () => { if (!this.destroyed) this.render() },
     })
@@ -347,7 +444,7 @@ export class ColworkTable {
       hideContextMenu: () => this.menu.hide(), showContextMenu: (x, y, groups) => this.menu.show(x, y, groups),
       protectionActions: () => this.pointer.protectionActions(), freezeSelection: axis => this.freezeSelection(axis),
       setFrozenPanes: (rows, columns) => this.setFrozenPanes(rows, columns), render: () => this.render(),
-      openRowView: () => this.openRowView(),
+      openRowView: () => this.openRowView(), openFind: () => this.openFind(),
       chooseImage: options.images?.upload ? () => this.chooseImage() : undefined,
       setStyle: (format, value) => this.formatting.setStyle(format, value), toggleFormat: format => this.formatting.toggleFormat(format),
       clearFormatting: () => this.formatting.clearFormatting(), toggleBorder: mode => this.formatting.toggleBorder(mode),
@@ -356,7 +453,58 @@ export class ColworkTable {
     this.undoButton = toolbar.undoButton
     this.redoButton = toolbar.redoButton
     this.protectionMenuButton = toolbar.protectionButton
-    shell.append(this.toolbar, this.viewport, this.frozenBoundaryLayer)
+    const entry = document.createElement('div')
+    entry.className = 'colwork-table__formula-bar'
+    this.formulaAddress = document.createElement('span')
+    this.formulaAddress.setAttribute('aria-hidden', 'true')
+    this.formulaInput = document.createElement('input')
+    this.formulaInput.setAttribute('aria-label', '公式栏')
+    this.formulaInput.placeholder = '输入文本或公式'
+    this.formulaInput.onfocus = () => {
+      const position = this.selectedImagePosition()
+      const key = position && cellKey(position)
+      const id = key && this.sheet.coordinates.cellId(key)
+      if (id) this.formulaDraft = { id, value: this.formulaInput.value, raw: this.cells.raw.get(id) }
+    }
+    this.formulaInput.oninput = () => this.options.onEditingChange?.({
+      editing: !!this.formulaDraft, dirty: !!this.formulaDraft && this.formulaDraft.value !== this.formulaInput.value,
+    })
+    this.formulaInput.onblur = () => this.finishFormula(true)
+    this.formulaInput.onkeydown = event => {
+      if (event.isComposing || !['Enter', 'Escape'].includes(event.key)) return
+      event.preventDefault()
+      this.finishFormula(event.key === 'Enter')
+      this.viewport.focus({ preventScroll: true })
+    }
+    this.validationButton = document.createElement('button')
+    this.validationButton.type = 'button'
+    this.validationButton.className = 'colwork-table__format'
+    this.validationButton.textContent = '选择选项'
+    this.validationButton.onclick = () => this.openValidationChoices()
+    const data = document.createElement('button')
+    data.type = 'button'
+    data.className = 'colwork-table__format'
+    data.textContent = '数据'
+    data.onclick = () => {
+      const bounds = data.getBoundingClientRect()
+      const actions: Array<[string, () => void]> = [['图表与数据透视', () => this.openAnalysis()]]
+      if (!this.readOnly) actions.unshift(['数据验证', () => this.openSheetRule('validation')], ['条件格式', () => this.openSheetRule('conditional')])
+      this.menu.show(bounds.left, bounds.bottom + 4, [{ label: '数据', actions }])
+    }
+    entry.append(this.formulaAddress, this.formulaInput, this.validationButton, data)
+    if (options.versionHistory) {
+      this.versionDialog = new VersionHistoryDialog(root, options.versionHistory, () => !this.readOnly && !this.destroyed, () => {
+        this.commitEditing()
+        return this.canExport() ? this.archive.snapshot() : undefined
+      })
+      const history = document.createElement('button')
+      history.type = 'button'
+      history.className = 'colwork-table__format'
+      history.textContent = '版本历史'
+      history.onclick = () => this.openVersionHistory()
+      entry.append(history)
+    }
+    shell.append(this.toolbar, entry, this.viewport, this.frozenBoundaryLayer)
     root.replaceChildren(shell)
     this.#watermark = new TableWatermark(shell)
     this.#applyViewPolicy(options.viewPolicy ?? {})
@@ -367,13 +515,16 @@ export class ColworkTable {
     if (shouldSeedDemo && !options.initializeAfterSync) seedDemoFormatting(this.sheet)
     this.expandLogicalSizeFromDocument()
     const { row, column } = this.sheet.coordinates.edits
-    this.undoManager = new Y.UndoManager([this.cells.raw, this.styles.raw, this.rowHeights.raw, this.columnWidths.raw, this.merges.raw, row, column], { captureTimeout: 500, trackedOrigins: this.session.external ? new Set([this]) : new Set([null, this]) })
+    this.undoManager = new Y.UndoManager([this.cells.raw, this.styles.raw, this.rowHeights.raw, this.columnWidths.raw, this.merges.raw, ...Object.values(this.sheet.features.maps), row, column], { captureTimeout: 500, trackedOrigins: this.session.external ? new Set([this]) : new Set([null, this]) })
     this.undoManager.on('stack-item-added', this.onHistoryChange)
     this.undoManager.on('stack-item-popped', this.onHistoryChange)
     this.undoManager.on('stack-cleared', this.onHistoryChange)
+    this.loadPersonalView()
     this.render()
     this.refreshHistoryButtons()
     this.cells.raw.observe(this.onCellsChange)
+    this.sheet.features.maps.validation.observe(this.onFeatureChange)
+    this.sheet.features.maps.conditional.observe(this.onFeatureChange)
     this.doc.on('afterTransaction', this.onFormulaDependencies)
     this.styles.raw.observe(this.onStylesChange)
     this.rowHeights.raw.observe(this.onSizesChange)
@@ -415,10 +566,15 @@ export class ColworkTable {
   setReadOnly(readOnly: boolean) {
     if (this.destroyed || this.readOnly === readOnly) return
     this.readOnly = readOnly
+    this.versionDialog?.close()
+    this.findDialog?.close()
+    this.dataDialog?.close()
+    this.finishFormula(false)
     this.editEpoch++
     this.editing.finish(false)
     this.resizing = undefined
     this.viewport.classList.remove('is-resizing')
+    this.cancelFill()
     this.pointer.cancel()
     this.dialogs.close()
     this.menu.hide()
@@ -429,10 +585,10 @@ export class ColworkTable {
   }
 
   /** Explicitly commits the active cell draft before a host publishes or exports. */
-  commitEditing() { if (!this.destroyed) this.editing.finish(true) }
+  commitEditing() { if (!this.destroyed) { this.editing.finish(true); this.finishFormula(true) } }
 
   /** Discards an active draft while preserving the current shared document value. */
-  cancelEditing() { if (!this.destroyed) this.editing.finish(false) }
+  cancelEditing() { if (!this.destroyed) { this.editing.finish(false); this.finishFormula(false) } }
 
   /** Replaces the entire local view policy. Omitted fields use their defaults. */
   setViewPolicy(policy: ColworkViewPolicy) {
@@ -468,7 +624,7 @@ export class ColworkTable {
       const value = encodeCellImage(await upload(file))
       const current = this.sheet.coordinates.cellKey(id)
       if (this.imageUploads.get(id) !== request || !current || this.readOnly || this.destroyed
-        || this.sheet.isCellLocked(current) || this.cells.raw.get(id) !== original) return false
+        || this.sheet.isCellLocked(current) || this.sheet.features.validationAt(current) || this.cells.raw.get(id) !== original) return false
       this.undoManager.stopCapturing()
       this.doc.transact(() => this.cells.raw.set(id, value), this)
       this.undoManager.stopCapturing()
@@ -517,6 +673,208 @@ export class ColworkTable {
     renderCellContent(element, this.formatting.displayValue(key), image, this.options.images?.resolveUrl)
   }
 
+  openVersionHistory() {
+    if (!this.destroyed && this.versionDialog) { this.commitEditing(); this.versionDialog.open() }
+  }
+
+  private refreshFormulaBar() {
+    if (!this.formulaInput || this.formulaDraft) return
+    const position = this.selectedImagePosition()
+    const key = position && cellKey(position)
+    this.formulaAddress.textContent = position ? excelColumn(position.column) + (this.sheet.coordinates.canonicalRow(position.row)! + 1) : '—'
+    this.formulaInput.value = key ? this.sheet.readCell(key) : ''
+    this.formulaInput.readOnly = !key || this.readOnly || this.sheet.isCellLocked(key)
+    this.validationButton.hidden = this.formulaInput.readOnly || !key || !this.sheet.features.validationAt(key)
+  }
+
+  private finishFormula(commit: boolean) {
+    const draft = this.formulaDraft
+    this.formulaDraft = undefined
+    if (draft && commit && !this.destroyed && !this.readOnly && draft.value !== this.formulaInput.value) {
+      const position = this.sheet.coordinates.cellKey(draft.id)
+      if (position && this.cells.raw.get(draft.id) === draft.raw && !this.sheet.isCellLocked(position)) {
+        this.writeInput(position, normalizeCellText(this.formulaInput.value))
+      }
+    }
+    this.refreshFormulaBar()
+    if (draft) this.options.onEditingChange?.({ editing: false, dirty: false })
+  }
+
+  private writeInput(key: string, value: string) {
+    if (!this.sheet.features.accepts(key, value)) {
+      this.dialogs.showLockMessage('内容不符合此单元格的数据验证规则')
+      return
+    }
+    this.doc.transact(() => this.sheet.writeCell(key, value), this)
+  }
+
+  private readonly applyCellStyle = (element: HTMLElement, key: string) => {
+    this.formatting.applyStyle(element, key)
+    if (!element.classList.contains('colwork-table__editor')) this.applyConditionalStyle(element, key)
+  }
+
+  private applyConditionalStyle(element: HTMLElement, key: string) {
+    const color = this.sheet.features.maps.conditional.size
+      ? this.sheet.features.backgroundAt(key, this.sheet.displayCell(key)) : undefined
+    element.style.backgroundColor = color ?? this.formatting.readStyle(key).background ?? ''
+  }
+
+  private openValidationChoices() {
+    const position = this.selectedImagePosition()
+    if (!position || this.readOnly) return
+    const key = cellKey(position)
+    const id = this.sheet.coordinates.cellId(key)
+    const rule = this.sheet.features.validationAt(key)
+    if (!id || !rule) return
+    const bounds = this.validationButton.getBoundingClientRect()
+    this.menu.show(bounds.left, bounds.bottom + 4, [{ label: '选择选项', actions: rule.choices.map(value => [value, () => {
+      const current = this.sheet.coordinates.cellKey(id)
+      if (current && !this.destroyed && !this.readOnly && !this.sheet.isCellLocked(current)) this.writeInput(current, value)
+    }]) }])
+  }
+
+  private openSheetRule(kind: 'validation' | 'conditional') {
+    if (this.readOnly || this.dataDialog?.open || !this.selection.focus) return
+    this.commitEditing()
+    if (this.sheet.coordinates.hasRowOrder) {
+      this.dialogs.showLockMessage('请在共享顺序下设置连续范围的规则')
+      return
+    }
+    const range = selectionRange(this.selection.anchor, this.selection.focus)
+    const id = this.sheet.features.rangeFor(range)
+    if (!id) return
+    const maps = this.sheet.features.maps
+    const save = (type: typeof kind, rule: unknown) => {
+      const current = this.sheet.coordinates.mergeRange(id)
+      if (!current || this.readOnly || this.destroyed || this.sheet.rangeHasLocks(current)) throw new Error('所选范围已变化或已锁定')
+      this.undoManager.stopCapturing()
+      this.doc.transact(() => {
+        if (rule) maps[type].set(id, JSON.stringify(rule))
+        else maps[type].delete(id)
+      }, this)
+      this.undoManager.stopCapturing()
+    }
+    this.dataDialog = openRuleDialog({
+      root: this.root,
+      validation: readFeature(maps.validation.get(id), isDataValidation),
+      conditional: readFeature(maps.conditional.get(id), isConditionalFormat),
+      saveValidation: rule => save('validation', rule), saveConditional: rule => save('conditional', rule),
+    }, kind)
+  }
+
+  private openAnalysis() {
+    if (this.dataDialog?.open || this.destroyed) return
+    this.commitEditing()
+    const range = this.selection.focus && !this.sheet.coordinates.hasRowOrder
+      ? selectionRange(this.selection.anchor, this.selection.focus) : undefined
+    const id = range && this.sheet.features.rangeFor(range)
+    let coordinates = new SheetCoordinates(this.doc, this.sheet.sheetId)
+    const analyses = this.sheet.features.maps.analyses
+    this.dataDialog = openAnalysisDialog({
+      root: this.root, range: range && range.end.row > range.start.row ? range : undefined, rangeId: id, readOnly: this.readOnly,
+      analyses: [...analyses].flatMap(([id, value]) => {
+        const rule = readFeature(value, isAnalysis)
+        return rule ? [[id, rule]] : []
+      }),
+      resolve: range => {
+        coordinates = new SheetCoordinates(this.doc, this.sheet.sheetId)
+        return coordinates.mergeRange(range)
+      },
+      columnId: column => coordinates.axisId('column', column)!,
+      columnPosition: id => coordinates.axisPosition('column', id),
+      subscribe: refresh => {
+        let frame: number | undefined
+        const listener = (transaction: Y.Transaction) => {
+          if (frame !== undefined || !transaction.changed.size) return
+          frame = requestAnimationFrame(() => { frame = undefined; refresh() })
+        }
+        this.doc.on('afterTransaction', listener)
+        return () => {
+          this.doc.off('afterTransaction', listener)
+          if (frame !== undefined) cancelAnimationFrame(frame)
+        }
+      },
+      read: (row, column) => {
+        const id = coordinates.cellId(cellKey({ row, column }))
+        const raw = id && this.cells.raw.get(id)
+        return id && raw ? this.sheet.formulas.display(this.sheet.sheetId, id, raw) : ''
+      },
+      save: rule => {
+        if (this.destroyed || this.readOnly) throw new Error('当前工作表为只读')
+        if (analyses.size >= 50) throw new Error('每张工作表最多保存 50 项分析')
+        this.doc.transact(() => analyses.set(makeSheetId(), JSON.stringify(rule)), this)
+      },
+      remove: id => { if (!this.readOnly && !this.destroyed) this.doc.transact(() => analyses.delete(id), this) },
+    })
+  }
+
+  private openFind() {
+    if (this.findDialog?.open || this.destroyed) return
+    this.commitEditing()
+    const matches = (query: string, display: boolean) => [...this.cells.keys()].filter(key => {
+      const source = this.sheet.readCell(key)
+      return display ? source.includes(query) || this.sheet.displayCell(key).includes(query)
+        : !source.startsWith('=') && source.includes(query)
+    })
+    this.findDialog = openFindReplace(this.root, this.readOnly, query => matches(query, true)
+      .map(key => parseCellKey(key)!).sort((a, b) => a.row - b.row || a.column - b.column),
+    position => this.navigateTo(position), (query, replacement, current) => {
+      const keys = matches(query, false).filter(key => !current || key === cellKey(current))
+      if (this.readOnly || keys.some(key => this.sheet.isCellLocked(key))) throw new Error('匹配范围包含受保护的单元格')
+      const edits = keys.map(key => {
+        const value = normalizeCellText(this.sheet.readCell(key).split(query).join(replacement))
+        return [key, value] as const
+      })
+      if (edits.some(([key, value]) => !this.sheet.features.accepts(key, value))) throw new Error('替换内容不符合数据验证规则')
+      this.undoManager.stopCapturing()
+      this.doc.transact(() => { for (const [key, value] of edits) this.sheet.writeCell(key, value.startsWith('=') ? "'" + value : value) }, this)
+      this.undoManager.stopCapturing()
+      return edits.length
+    })
+  }
+
+  private get personalViewStorageKey() {
+    const key = this.options.personalViewKey
+    return key ? `colwork:view:${JSON.stringify([key, this.sheet.sheetId])}` : undefined
+  }
+
+  private savePersonalView() {
+    const storageKey = this.personalViewStorageKey
+    if (!storageKey || this.restoringRowView || this.pendingRowView) return
+    const { sort, filters, headerRows } = this.rowView
+    const stable = <T extends { column: number }>(item: T) => ({
+      ...item, column: this.sheet.coordinates.axisId('column', item.column),
+    })
+    try {
+      this.root.ownerDocument.defaultView?.localStorage.setItem(storageKey, JSON.stringify({
+        sort: sort && stable(sort), filters: filters?.map(stable), headerRows,
+      }))
+    } catch { /* Private browsing and full storage still allow an in-memory view. */ }
+  }
+
+  private loadPersonalView() {
+    const key = this.personalViewStorageKey
+    if (!key) return
+    try {
+      const saved = JSON.parse(this.root.ownerDocument.defaultView?.localStorage.getItem(key) ?? 'null')
+      if (!saved || typeof saved !== 'object') return
+      const position = (column: unknown) => typeof column === 'string'
+        ? this.sheet.coordinates.axisPosition('column', column) : undefined
+      this.pendingRowView = false
+      const storedColumns = [saved.sort?.column, ...(Array.isArray(saved.filters) ? saved.filters.map((filter: { column?: unknown }) => filter?.column) : [])]
+      this.pendingRowView = storedColumns.some(column => typeof column === 'string' && column.includes('~') && position(column) === undefined)
+      const sortColumn = position(saved.sort?.column)
+      const filters: ColworkRowView['filters'] = Array.isArray(saved.filters) ? saved.filters.flatMap((filter: { column?: unknown; contains?: unknown }) => {
+        const column = position(filter?.column)
+        return column !== undefined && typeof filter?.contains === 'string' ? [{ column, contains: filter.contains }] : []
+      }) : undefined
+      this.restoringRowView = true
+      this.setRowView({ sort: sortColumn === undefined ? undefined : { column: sortColumn, direction: saved.sort.direction },
+        filters, headerRows: saved.headerRows })
+    } catch { /* A stale or invalid saved view can be recreated from the toolbar. */ }
+    finally { this.restoringRowView = false }
+  }
+
   getRowView(): ColworkRowView { return structuredClone(this.rowView) }
 
   setRowView(view: ColworkRowView) {
@@ -530,9 +888,12 @@ export class ColworkTable {
     const next = { sort: view.sort && { ...view.sort }, filters, headerRows: view.headerRows }
     try { this.sheet.applyRowView(next) } catch (error) { this.sheet.applyRowView(this.rowView); throw error }
     this.rowView = next
+    if (!this.restoringRowView) this.pendingRowView = false
+    this.savePersonalView()
     this.selection.anchor = this.selection.focus = undefined
     this.selection.selectedKey = this.selection.pendingCursor = undefined
     this.selection.updateAwareness({ cursor: undefined, editing: null })
+    this.cancelFill()
     this.pointer.cancel()
     this.viewport.scrollTop = 0
     this.render()
@@ -545,6 +906,7 @@ export class ColworkTable {
   }
 
   private refreshRowOrder() {
+    this.cancelFill()
     const coordinates = this.sheet.coordinates
     const focus = this.selection.focus && coordinates.cellId(cellKey(this.selection.focus))
     const anchor = this.selection.anchor && coordinates.cellId(cellKey(this.selection.anchor))
@@ -682,6 +1044,106 @@ export class ColworkTable {
     element.append(handle)
   }
 
+  private cancelFill() {
+    this.fill = undefined
+    this.viewport.classList.remove('is-filling')
+  }
+
+  private updateFillTarget(event: MouseEvent) {
+    const cell = this.root.ownerDocument.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLTableCellElement>('td[data-key]')
+    const position = cell && this.table.contains(cell) && parseCellKey(cell.dataset.key!)
+    if (this.fill && position) this.fill.target = position
+  }
+
+  private fillSelection(source: CellRange, end: CellPosition) {
+    if (this.readOnly || this.destroyed) return
+    const { start, end: bottomRight } = source
+    const vertical = Math.max(start.row - end.row, end.row - bottomRight.row, 0)
+    const horizontal = Math.max(start.column - end.column, end.column - bottomRight.column, 0)
+    if (!vertical && !horizontal) return
+    const axis = vertical >= horizontal ? 'row' : 'column'
+    const first = start[axis], last = bottomRight[axis]
+    const min = Math.min(first, end[axis]), max = Math.max(last, end[axis])
+    const range = { start: { ...start, [axis]: min }, end: { ...bottomRight, [axis]: max } }
+    const intersects = (a: CellRange, b: CellRange) => a.start.row <= b.end.row && b.start.row <= a.end.row
+      && a.start.column <= b.end.column && b.start.column <= a.end.column
+    if (this.sheet.rangeHasLocks(range) || this.sheet.getMergeRanges().some(merge => intersects(range, merge))) {
+      this.dialogs.showLockMessage('填充范围包含锁定或合并的单元格')
+      return
+    }
+    const width = bottomRight.column - start.column + 1
+    const height = bottomRight.row - start.row + 1
+    if ((max - min + 1) * (axis === 'row' ? width : height) > 100000) {
+      this.dialogs.showLockMessage('单次填充最多十万个单元格')
+      return
+    }
+    const period = last - first + 1
+    const wrap = (offset: number) => ((offset % period) + period) % period
+    const number = (value: string | undefined) => value && /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value) ? Number(value) : NaN
+    const series = new Map<number, { start: number; step: number }>()
+    const perpendicular = axis === 'row' ? 'column' : 'row'
+    if (period >= 2) {
+      for (let lane = start[perpendicular]; lane <= bottomRight[perpendicular]; lane++) {
+        const valueAt = (offset: number) => number(this.cells.get(cellKey({ ...start, [axis]: first + offset, [perpendicular]: lane })))
+        const initial = valueAt(0)
+        const step = valueAt(1) - initial
+        if (!Number.isFinite(step)) continue
+        let offset = 2
+        while (offset < period && valueAt(offset) === initial + step * offset) offset++
+        if (offset === period) series.set(lane, { start: initial, step })
+      }
+    }
+    const edits: Array<{ key: string; value?: string; style?: string }> = []
+    for (let row = range.start.row; row <= range.end.row; row++) {
+      for (let column = range.start.column; column <= range.end.column; column++) {
+        const position = { row, column }
+        if (containsPosition(source, position)) continue
+        const from = { ...position, [axis]: first + wrap(position[axis] - first) }
+        const lane = series.get(position[perpendicular])
+        const raw = this.cells.get(cellKey(from))
+        const rows = (this.sheet.coordinates.canonicalRow(row) ?? row) - (this.sheet.coordinates.canonicalRow(from.row) ?? from.row)
+        const value = lane ? String(lane.start + lane.step * (position[axis] - first))
+          : raw === undefined ? undefined : this.sheet.formulas.shift(raw, this.sheet.sheetId, rows, column - from.column)
+        edits.push({ key: cellKey(position), value, style: this.styles.get(cellKey(from)) })
+      }
+    }
+    if (edits.some(({ key, value }) => value !== undefined && !this.sheet.features.accepts(key, this.sheet.formulas.source(value)))) {
+      this.dialogs.showLockMessage('填充内容不符合数据验证规则')
+      return
+    }
+    this.undoManager.stopCapturing()
+    this.doc.transact(() => {
+      for (const { key, value, style } of edits) {
+        if (value === undefined) this.cells.delete(key)
+        else this.cells.set(key, value)
+        if (style === undefined) this.styles.delete(key)
+        else this.styles.set(key, style)
+      }
+    }, this)
+    this.undoManager.stopCapturing()
+    this.selection.selectRange(range.start, range.end)
+    this.selection.publishSelection()
+  }
+
+  private refreshFillHandle() {
+    this.table.querySelector('.colwork-table__fill-handle')?.remove()
+    if (this.readOnly || this.selection.mode || !this.selection.focus || this.editing.input) return
+    const source = selectionRange(this.selection.anchor, this.selection.focus)
+    const cell = this.table.querySelector(`td[data-key="${cellKey(source.end)}"]`)
+    if (!cell) return
+    const handle = document.createElement('span')
+    handle.className = 'colwork-table__fill-handle'
+    handle.title = '拖动填充'
+    handle.onmousedown = event => {
+      if (event.button !== 0) return
+      event.preventDefault()
+      event.stopPropagation()
+      this.fill = { source, target: source.end }
+      this.viewport.classList.add('is-filling')
+    }
+    cell.append(handle)
+  }
+
   private mergeSelection() {
     if (this.readOnly || this.selectionHasLocks()) return
     const range = selectionRange(this.selection.anchor, this.selection.focus)
@@ -740,8 +1202,9 @@ export class ColworkTable {
     if (this.readOnly || this.selectionHasLocks()) return
     const range = selectionRange(this.selection.anchor, this.selection.focus)
     this.doc.transact(() => {
-      for (let row = range.start.row; row <= range.end.row; row += 1) {
-        for (let column = range.start.column; column <= range.end.column; column += 1) this.cells.delete(cellKey({ row, column }))
+      for (const key of this.cells.keys()) {
+        const position = parseCellKey(key)
+        if (position && containsPosition(range, position)) this.cells.delete(key)
       }
     }, this)
   }
@@ -770,7 +1233,7 @@ export class ColworkTable {
       rowLabel: row => { const index = this.sheet.coordinates.canonicalRow(row); return index === undefined ? '' : String(index + 1) },
       getMergeRanges: () => this.sheet.getMergeRanges(), isCellLocked: (key, merge) => this.sheet.isCellLocked(key, merge),
       isCellPasswordLocked: (key, merge) => this.sheet.isCellPasswordLocked(key, merge), renderContent: this.renderContent,
-      applyStyle: (element, key) => this.formatting.applyStyle(element, key),
+      applyStyle: this.applyCellStyle,
       addResizeHandle: (element, axis, index) => this.addResizeHandle(element, axis, index),
       addHeaderSelection: (element, axis, index) => this.pointer.addHeaderSelection(element, axis, index),
       selectRange: (anchor, focus, mode) => this.selection.selectRange(anchor, focus, mode),
@@ -781,13 +1244,26 @@ export class ColworkTable {
     this.refreshCursors()
   }
 
-  private refreshValues() { refreshValues(this.refreshView()) }
-  private refreshSelection() { refreshSelection(this.refreshView()) }
+  private refreshValues() {
+    refreshValues(this.refreshView())
+    if (this.sheet.features.maps.conditional.size) {
+      this.table.querySelectorAll<HTMLTableCellElement>('td[data-key]').forEach(cell => {
+        this.applyConditionalStyle(cell, cell.dataset.key!)
+        const value = cell.querySelector<HTMLElement>('.colwork-table__cell-value')
+        if (value) this.applyConditionalStyle(value, cell.dataset.key!)
+      })
+    }
+    this.refreshFormulaBar()
+  }
+  private refreshSelection() { refreshSelection(this.refreshView()); this.refreshFormulaBar(); this.refreshFillHandle() }
   private refreshCursors() { refreshCursors(this.refreshView()) }
-  private refreshStyles() { refreshStyles(this.refreshView()) }
+  private refreshStyles() {
+    refreshStyles(this.refreshView())
+    this.refreshFormulaBar()
+  }
   private refreshView() {
     return { table: this.table, viewport: this.viewport, editingKey: this.editing?.key, formatting: this.formatting,
-      selection: this.selection, awareness: this.awareness, sheet: this.sheet, userColor: this.options.userColor, renderContent: this.renderContent,
+      selection: this.selection, applyStyle: this.applyCellStyle, awareness: this.awareness, sheet: this.sheet, userColor: this.options.userColor, renderContent: this.renderContent,
       rowCount: this.rowCount, columnCount: this.columnCount,
       size: (axis: 'row' | 'column', index: number) => axis === 'row' ? this.getRowHeight(index) : this.getColumnWidth(index) }
   }
@@ -799,12 +1275,18 @@ export class ColworkTable {
     this.imageUploads.clear()
     this.#watermark.destroy()
     this.rowViewDialog?.remove()
+    this.findDialog?.remove()
+    this.dataDialog?.close()
+    this.dataDialog?.remove()
+    this.versionDialog?.close()
     this.viewportResizeObserver.disconnect()
     this.dialogs.close()
     this.editing.finish(false)
     this.archive.destroy()
     this.awareness.off('change', this.onAwarenessChange)
     this.cells.raw.unobserve(this.onCellsChange)
+    this.sheet.features.maps.validation.unobserve(this.onFeatureChange)
+    this.sheet.features.maps.conditional.unobserve(this.onFeatureChange)
     this.doc.off('afterTransaction', this.onFormulaDependencies)
     this.styles.raw.unobserve(this.onStylesChange)
     this.rowHeights.raw.unobserve(this.onSizesChange)

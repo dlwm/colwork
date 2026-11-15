@@ -1,6 +1,7 @@
 import type * as Y from 'yjs'
 import type { Awareness } from 'y-protocols/awareness'
 import type { ColworkImageRef } from './cellImage'
+import type { ColworkVersionHistory } from './versionHistory'
 
 export type ColworkImageOptions = {
   upload?: (file: File) => Promise<ColworkImageRef>
@@ -29,6 +30,11 @@ type CommonOptions = {
   readOnly?: boolean
   viewPolicy?: ColworkViewPolicy
   images?: ColworkImageOptions
+  versionHistory?: ColworkVersionHistory
+  /** Stable, user-specific key for saving personal views in this browser. */
+  personalViewKey?: string
+  /** Keep the exportable in-memory update log. Defaults off when a history adapter is registered. */
+  recordUpdateLog?: boolean
   onEditingChange?: (state: EditingState) => void
 }
 export type ExternalCollaborationOptions = CommonOptions & {
@@ -42,6 +48,7 @@ export type ExternalCollaborationOptions = CommonOptions & {
   initializeAfterSync?: false
   signalingUrl?: never
   websocketUrl?: never
+  websocketChunks?: never
   peerOpts?: never
 }
 export type BuiltInCollaborationOptions = CommonOptions & {
@@ -51,6 +58,8 @@ export type BuiltInCollaborationOptions = CommonOptions & {
   sheetId?: never
   signalingUrl?: string
   websocketUrl?: string
+  /** Enable chunked sync when connected to the Colwork Cloudflare worker. */
+  websocketChunks?: boolean
   peerOpts?: Record<string, unknown>
   initializeAfterSync?: boolean
   rows?: string[][]

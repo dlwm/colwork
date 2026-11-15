@@ -4,6 +4,7 @@ import { COLWORK_MAP_NAMES, COLWORK_SCHEMA_VERSION, type CellStyle, type Passwor
 import { hasOverlappingMerges } from './model-merges'
 import type { CellRange } from './range'
 import { axisRootNames, parseAxisId, SheetCoordinates, type SheetAxis } from './sheetCoordinates'
+import { featureRootNames, getSheetFeatureMaps, isAnalysis, isConditionalFormat, isDataValidation, readFeature } from './sheetFeatures'
 import { sheetRoot, sheetIdPattern, workbookRoot, workbookOrderRoot } from './workbookModel'
 
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
@@ -51,7 +52,7 @@ export function validateSheetDocument(document: Y.Doc, limits: SheetValidationLi
   }
   const issue = (path: string, message: string) => { issues.push({ path, message }) }
   if (!limits.allowUnknownRoots) {
-    const names = new Set<string>([...Object.values(COLWORK_MAP_NAMES), ...Object.values(axisRootNames)])
+    const names = new Set<string>([...Object.values(COLWORK_MAP_NAMES), ...Object.values(axisRootNames), ...Object.values(featureRootNames)])
     for (const key of document.share.keys()) {
       if (key === workbookRoot || key === workbookOrderRoot || names.has(key)) continue
       const [prefix, id, name, extra] = key.split(':')
@@ -60,8 +61,9 @@ export function validateSheetDocument(document: Y.Doc, limits: SheetValidationLi
   }
   let maps: SheetMaps
   let metadata: Y.Map<unknown>
+  let features: ReturnType<typeof getSheetFeatureMaps>
   let coordinates: SheetCoordinates
-  try { maps = getSheetMaps(document, sheetId); metadata = document.getMap(sheetRoot(COLWORK_MAP_NAMES.metadata, sheetId)) } catch {
+  try { maps = getSheetMaps(document, sheetId); features = getSheetFeatureMaps(document, sheetId); metadata = document.getMap(sheetRoot(COLWORK_MAP_NAMES.metadata, sheetId)) } catch {
     return [...issues, { path: '$', message: 'Sheet roots must be Y.Map values' }]
   }
   try { coordinates = new SheetCoordinates(document, sheetId) } catch {
@@ -69,7 +71,7 @@ export function validateSheetDocument(document: Y.Doc, limits: SheetValidationLi
   }
   // Yjs can apply sequence content to a pre-materialized map. Map iteration alone
   // cannot detect these incompatible text/array/XML updates, including embeds.
-  for (const [name, map] of [...Object.entries(maps), ['metadata', metadata]] as Array<[string, Y.Map<unknown>]>) {
+  for (const [name, map] of [...Object.entries(maps), ...Object.entries(features), ['metadata', metadata]] as Array<[string, Y.Map<unknown>]>) {
     if (!(map instanceof Y.Map) || map._start !== null) issue(name, 'Expected map entries without sequence content')
   }
   for (const axis of ['row', 'column'] as const) {
@@ -88,7 +90,7 @@ export function validateSheetDocument(document: Y.Doc, limits: SheetValidationLi
     const extent = coordinates.extent(axis)
     if (!Number.isSafeInteger(extent) || (extent > 1 && bound !== undefined && extent > bound)) issue(axisRootNames[axis], 'Axis exceeds the allowed extent')
   }
-  const count = Object.values(maps).reduce((total, map) => total + map.size,
+  const count = [...Object.values(maps), ...Object.values(features)].reduce((total, map) => total + map.size,
     metadata.size + coordinates.edits.row.length + coordinates.edits.column.length)
   if (limits.maxEntries !== undefined && count > limits.maxEntries) issue('$', 'Document exceeds maxEntries')
   const positionValid = (row: number, column: number) => row < Number.MAX_SAFE_INTEGER && column < Number.MAX_SAFE_INTEGER
@@ -145,6 +147,25 @@ export function validateSheetDocument(document: Y.Doc, limits: SheetValidationLi
     }
   })
   if (hasOverlappingMerges(merges)) issue('merges', 'Merge ranges must not overlap')
+  const featureRangeValid = (key: string) => {
+    const [start, end, extra] = key.split('-')
+    const first = start && coordinates.cellPosition(start)
+    const last = end && coordinates.cellPosition(end)
+    return !!start && !!end && extra === undefined && cellIdValid(start) && cellIdValid(end)
+      && (!(first && last) || (first.row <= last.row && first.column <= last.column && positionValid(last.row, last.column)))
+  }
+  for (const [name, map] of Object.entries(features) as Array<[keyof typeof features, Y.Map<string>]>) {
+    map.forEach((value, key) => {
+      stringValid(name, key, value)
+      if (name === 'analyses') {
+        const analysis = readFeature(value, isAnalysis)
+        if (!analysis || !/^[a-f0-9]{32}$/.test(key) || !featureRangeValid(analysis.range)
+          || [analysis.group, analysis.value, analysis.column].some(id => id !== undefined && !axisIdValid('column', id))) issue(`${name}.${key}`, 'Invalid analysis')
+      } else if (!featureRangeValid(key) || !(name === 'validation' ? readFeature(value, isDataValidation) : readFeature(value, isConditionalFormat))) {
+        issue(`${name}.${key}`, 'Invalid sheet rule')
+      }
+    })
+  }
   metadata.forEach((value, key) => {
     if (key === 'schemaVersion') {
       if (value !== COLWORK_SCHEMA_VERSION) issue('metadata.schemaVersion', 'Unsupported schema version')

@@ -33,6 +33,14 @@ const table = new ColworkTable(document.querySelector<HTMLElement>('#table')!, {
 
 在浏览器中创建实例，并准备好表格容器和自己的 Yjs WebSocket 服务；npm 包不包含服务端。包提供 ES / UMD 构建及 TypeScript 类型声明，Vue / React 示例见下方开发入口。通过浏览器直接使用 UMD 构建时，需要先提供 `Y`、`YAwareness`、`YWebrtc` 和 `YWebsocket` 全局依赖。
 
+### 从 0.3 升级到 0.4
+
+- 将使用 `@kuzuma/colwork` 的前端、协作服务和锁文件一起更新。尤其是通过 `@kuzuma/colwork/model` 校验或保存 Yjs 快照的服务，升级后才能识别新版的校验规则、条件格式和分析配置。宿主若另外维护根白名单，请加入 `colwork-validation`、`colwork-conditional-format`、`colwork-analyses` 及各工作表下的同名根。若用规范化内容计算保存摘要，同时纳入 `getSheetFeatureMaps()` 提供的规则和分析配置。
+- 现有 `ColworkTable`、`ColworkWorkbook` 及宿主管理连接的构造参数继续可用。复测外层布局对新增公式栏的适配，以及 Enter 提交后下移、Tab 横向移动的行为。
+- 要启用版本历史，按下方示例注册 `versionHistory`。保存的版本由宿主管理，注册后默认关闭浏览器会话更新日志。通过 `recordUpdateLog: true` 可以保留原有日志导出流程。
+- 通过 `personalViewKey` 还原个人筛选时，请使用当前账号和文档的稳定标识。Excel 图片往返需要接入 `uploadImage` 和 `readImage`。
+- 使用 Colwork 自带 Cloudflare Worker 的项目可启用双向大消息分帧。部署时先更新 Worker，再让客户端开启 `websocketChunks` 或 `createColworkWebSocket()`。自管或第三方 WebSocket 服务可继续沿用原来的传输配置。Worker 现在会同时使用快照和增量日志，回滚旧版 Worker 前应先导出并妥善保管完整的当前快照。
+
 ### 从 0.2 升级到 0.3
 
 0.3 支持旧存档，并使用稳定的行列标识同步增删操作。在共享房间启用增删行列前，请将协作客户端统一升级到 0.3。使用仓库自带 Cloudflare 后端时，请同步升级服务端。默认行高改为 28 px，已有的自定义行高继续从存档读取。
@@ -118,10 +126,45 @@ const bytes = await exportXlsx(document)
 // 在受保护的场景，先从服务端取得经过授权的快照，再转换成 XLSX。
 ```
 
-- **工作表**可以新增、改名、删除和切换。工作表及其内容会同步，当前标签和个人视图留在本机。已有单表存档会打开为第一张工作表。宿主可用 `listWorkbookSheets()` 获取工作表，再将表 ID 传给 `getSheetMaps()` 或 `readSheetSnapshot()`。
-- **个人排序筛选**可选择排序列和方向、保留标题行，并同时按多列的文字包含条件筛选。它只调整当前视图，编辑仍会写回对应记录。宿主可调用 `ColworkTable.setRowView()` 或 `openRowView()`。跨行合并的工作表需先拆分合并区域，增删行列前需清除当前视图。
-- **公式**可输入 `=A1*2`、`=SUM(B2:B8)`、`=IF(A1>0,"有值","空")` 或 `='预算表'!B2`。支持算术、比较、百分比、连接、范围、跨表引用，以及常用统计和逻辑函数。新增公式将引用绑定到工作表和行列标识，改名、插行后引用仍指向原记录。被删除的引用显示 `#REF!`，循环引用显示 `#CYCLE!`。用 `'=` 开头可录入以等号开头的文本。
-- **Excel**支持 `.xlsx` 工作表、常见值、公式、合并、行列尺寸和 Colwork 支持的单元格格式。导入将工作表加到当前工作簿，独立的新建文档可传入 `{ replaceBlankMain: true }` 复用空白首页。导出使用共享顺序和全量可见工作表数据。导入上限为 10 MB、32 张工作表、十万单元格。受保护文档还受单条协作更新的 1 MiB 限制。Colwork 的计算器支持常用函数，其他 Excel 函数可随公式往返保留。宏、图表、条件格式等 Excel 特有对象不在当前兼容范围内。
+- **工作表**可以新增、改名、删除、切换及拖动重排。键盘可用 Alt + 左右方向键重排标签。工作表及其内容会同步，当前标签和个人视图留在本机。已有单表存档会打开为第一张工作表。宿主可用 `listWorkbookSheets()` 获取工作表，再将表 ID 传给 `getSheetMaps()` 或 `readSheetSnapshot()`。
+- **个人排序筛选**可选择排序列和方向、保留标题行，并同时按多列的文字包含条件筛选。它只调整当前视图，编辑仍会写回对应记录。宿主可调用 `ColworkTable.setRowView()` 或 `openRowView()`。跨行合并涉及的相邻行会作为一组移动。保留标题行的边界如果穿过一个合并组，会保留整组。筛选时组内至少一行满足全部条件就会保留整组。增删行列前需清除当前视图。设置 `personalViewKey` 可在刷新后恢复筛选条件，请用宿主账号与文档 ID 组合出稳定的键。
+- **公式**可输入 `=A1*2`、`=SUM(B2:B8)`、`=IF(A1>0,"有值","空")` 或 `='预算表'!B2`。支持算术、比较、百分比、连接、范围、跨表引用，以及常用统计和逻辑函数，包括 `SUMIF`、`SUMIFS`、`COUNTIF`、`COUNTIFS` 和单值 `XLOOKUP`。新增公式将引用绑定到工作表和行列标识，改名、插行后引用仍指向原记录。被删除的引用显示 `#REF!`，循环引用显示 `#CYCLE!`。用 `'=` 开头可录入以等号开头的文本。
+- **Excel**支持 `.xlsx` 工作表、常见值、公式、合并、行列尺寸和 Colwork 支持的单元格格式。导入将工作表加到当前工作簿，独立的新建文档可传入 `{ replaceBlankMain: true }` 复用空白首页。导出使用共享顺序和全量可见工作表数据。导入上限为 10 MB、32 张工作表、十万单元格。支持往返常见的内嵌图片、内联下拉列表和单色条件格式。其他 Excel 函数可随公式往返保留。Excel 的宏、原生图表、原生数据透视表及高级规则暂未实现转换。
+
+## 编辑及分析
+
+- 方向键移动，Shift + 方向键扩选，Tab 横向移动，Enter 提交并下移。F2、空格与直接输入可进入编辑。选中单元格后可从公式栏查看和修改原始内容。
+- 从选区右下角拖动填充柄可复制格式和内容、延续等差数列，并移动公式的相对引用；公式中的绝对引用保持原位。填充范围需要为普通、可编辑的单元格。
+- Ctrl/⌘ + F 或工具栏「查找」可定位当前工作表视图中的内容。替换支持当前项和全部文本。
+- 「数据」菜单可配置下拉校验、包含／等于／大于／小于／空白高亮，以及以选区首行为标题的柱状图、折线图、行列分组透视汇总。分析设置随工作表同步，汇总可选择求和、计数和平均值。宿主可通过 `getSheetFeatureMaps(document, sheetId)` 获取规则和分析的 Yjs 根。
+
+## 版本历史接入
+
+在 `ColworkTable` 或 `ColworkWorkbook` 上注册 `versionHistory` 后，界面显示「版本历史」。具体数据读写由宿主提供的回调完成。
+
+```ts
+const versionHistory: ColworkVersionHistory = {
+  documentId,
+  list: ({ documentId, cursor, signal }) =>
+    historyService.list(documentId, { cursor, signal }),
+  create: ({ documentId, label, signal }) =>
+    historyService.saveCurrent(documentId, { label, signal }),
+  restore: ({ documentId, versionId, signal }) =>
+    historyService.restore(documentId, versionId, { signal }),
+}
+
+const workbook = new ColworkWorkbook(container, {
+  collaboration: { document, awareness },
+  user: viewer.displayName,
+  versionHistory,
+  recordUpdateLog: false,
+})
+```
+
+- `list` 只返回当前页的版本元数据和可选的 `nextCursor`，并可单独注册为只读历史。宿主负责鉴权、版本留存和提交的原子性。关闭面板会中止前端等待，请用 `signal` 取消可取消的网络请求。
+- 保存前 Colwork 会提交当前编辑。建议宿主等待协作更新落库，再从服务端捕获版本。若宿主需要保存客户端快照，可设 `captureClientSnapshot: true`，此时允许导出的实例会向 `create` 提供一个 `snapshot`。宿主可自行决定快照或增量的存储策略。
+- 恢复由宿主应用到当前共享文档，并通过已有协作连接同步给参与者。`restoreWorkbookVersion(liveDoc, versionBytes)` 可在 Node 端把保存的完整 Yjs 状态恢复为一次可同步的事务，保留宿主自定义的 Yjs 根。宿主按业务需要在恢复前保留当前版本或检查服务端版本号。
+- 默认注册版本历史后会关闭旧的浏览器会话更新日志，仍可通过 `recordUpdateLog: true` 显式开启。库沿用构造参数注册回调及已有的 `onEditingChange`，React 和 Vue 共用同一个接口。独立的工作簿演示以浏览器 IndexedDB 实现宿主存储，保留最近 12 个版本。
 
 ## 单元格图片
 
@@ -143,7 +186,7 @@ const images = {
 const table = new ColworkTable(container, { ...options, images })
 ```
 
-选中单元格后可通过「插入图片」选择文件，也可直接粘贴 PNG、JPEG、GIF 或 WebP。宿主应在上传和取图接口校验权限。私有图片可以使用同源鉴权地址或由宿主生成的短期签名地址。Yjs 快照保留图片引用，恢复快照时仍需访问原图片资源。Excel 导出目前写入图片说明。
+选中单元格后可通过「插入图片」选择文件，也可直接粘贴 PNG、JPEG、GIF 或 WebP。宿主应在上传和取图接口校验权限。私有图片可以使用同源鉴权地址或由宿主生成的短期签名地址。Yjs 快照保留图片引用，恢复快照时仍需访问原图片资源。Excel 侧通过 `importXlsx(document, bytes, { uploadImage })` 将 PNG、JPEG、GIF 图片交给宿主存储，并按左上锚点映射到单元格。导出可注册 `exportXlsx(document, { readImage })` 取回字节并嵌入，缺少可读取的图片时导出说明。
 
 本地 Cloudflare 演示提供临时上传接口，每张图片最多 512 KB。业务部署应接入宿主自己的存储和权限。
 
@@ -278,7 +321,7 @@ npm run dev -- --source=local
 npm run dev -- --source=npm
 ```
 
-npm 模式自动从官方 registry 安装 `@kuzuma/colwork@0.3.0` 到被 Git 忽略的 `.wrangler/npm-demo/`，不会修改项目依赖或锁文件；本地模式保留源码热更新。若要测试其他已发布版本，设置 `COLWORK_NPM_VERSION`：
+npm 模式自动从官方 registry 安装 `@kuzuma/colwork@0.4.0` 到被 Git 忽略的 `.wrangler/npm-demo/`，不会修改项目依赖或锁文件；本地模式保留源码热更新。若要测试其他已发布版本，设置 `COLWORK_NPM_VERSION`：
 
 ```sh
 COLWORK_NPM_VERSION=latest npm run dev -- --source=npm
@@ -338,6 +381,12 @@ OAuth 是 [Wrangler 的部署授权](https://developers.cloudflare.com/workers/w
 `.gitignore` 排除 `.wrangler/`（生成配置、部署结果、本地数据和日志）、`config/cloudflare/*.env`、`.env*`、`.dev.vars*`、`site-dist/`、`site-dist*.zip` 和 Worker 打包结果；无秘密的 `.example` 模板可提交。部署前检查这些路径是否已被 Git 跟踪，并检查项目内指定的配置文件是否确实被忽略；检查失败就停止部署。使用 `CF_DEPLOY_CONFIG` 指定项目内的新路径时，也必须先将其加入忽略规则。
 
 如只想使用 `workers.dev`，将两个 `CF_*_CUSTOM_DOMAIN` 值留空。变更 Worker 名称时，脚本会同步更新前端服务绑定；已经有线上数据后应保持后端名称和 Durable Object 类名不变，避免连接到新的存储空间。
+
+### 大表协作
+
+本项目的 Cloudflare 后端支持双向 WebSocket 分帧。内置连接设置 `websocketChunks: true`，宿主管理的 `y-websocket` 连接可传入 `WebSocketPolyfill: createColworkWebSocket()`。兼容旧客户端的小消息。分帧后仍在完整接收并校验顺序后统一应用，重连继续使用 Yjs 状态向量补发遗漏的更新。分帧协作单次逻辑消息上限为 48 MiB。可用 `waitForColworkSync(provider.ws)` 在保存版本或显示导入完成前，等待当前连接已经发送的更新持久化。
+
+Worker 追加保存当前文档的更新，并在 128 条或 8 MiB 时将日志合并为当前快照。合并沿用旧快照目录，业务版本历史由前述宿主接口保存。使用第三方协作服务时请按该服务的协议和消息大小接入。
 
 ### 发布后检查
 

@@ -3,6 +3,7 @@ import { Awareness } from 'y-protocols/awareness'
 import { WebrtcProvider } from 'y-webrtc'
 import { WebsocketProvider } from 'y-websocket'
 import type { ColworkTableOptions } from './options'
+import { createColworkWebSocket } from './colworkWebSocket'
 
 const activePublishers = new WeakMap<Awareness, CollaborationSession>()
 const defaultIceServers = ['stun:stun.qq.com:3478', 'stun:stun.miwifi.com:3478', 'stun:stun.chat.bilibili.com:3478', 'stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'].map(urls => ({ urls }))
@@ -41,7 +42,7 @@ export class CollaborationSession {
           const url = new URL(options.websocketUrl ?? 'ws://127.0.0.1:1234')
           const params = Object.fromEntries(url.searchParams)
           url.search = ''
-          this.provider = new WebsocketProvider(url.toString().replace(/\/$/, ''), encodeURIComponent(options.room), this.document, { params, connect: !options.initializeAfterSync })
+          this.provider = new WebsocketProvider(url.toString().replace(/\/$/, ''), encodeURIComponent(options.room), this.document, { params, connect: !options.initializeAfterSync, WebSocketPolyfill: options.websocketChunks ? createColworkWebSocket() : undefined })
           this.awareness = this.provider.awareness
         }
         if (options.snapshot) Y.applyUpdate(this.document, options.snapshot)

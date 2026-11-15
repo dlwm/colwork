@@ -4,11 +4,13 @@ import { getSheetMaps, validateSheetDocument } from './model-validation'
 import { bytesToBase64, type YjsSnapshotFile } from './yjsArchive'
 import { SheetCoordinates } from './sheetCoordinates'
 import { FormulaBook } from './formulas'
+import { getSheetFeatureMaps } from './sheetFeatures'
 export * from './model-schema'
+export { getSheetFeatureMaps, type ColworkAnalysis, type ColworkConditionalFormat, type ColworkDataValidation } from './sheetFeatures'
 export type { CellPosition, CellRange } from './range'
 export { getSheetMaps, validateSheetDocument } from './model-validation'
 export { rebuildYjsSnapshot } from './yjsRebuild'
-export { listWorkbookSheets, addWorkbookSheet, removeWorkbookSheet, setWorkbookSheetName, MAIN_SHEET_ID, type WorkbookSheet } from './workbookModel'
+export { listWorkbookSheets, addWorkbookSheet, removeWorkbookSheet, moveWorkbookSheet, setWorkbookSheetName, MAIN_SHEET_ID, type WorkbookSheet } from './workbookModel'
 export type { YjsArchiveFile, YjsSnapshotFile, YjsUpdateLogFile, YjsUpdateRecord } from './yjsArchive'
 
 /** Resolves a visual cell key such as "0:0" to its key in getSheetMaps(). */
@@ -72,7 +74,7 @@ export function initializeBlankSheet(document: Y.Doc): void {
   const issues = validateSheetDocument(document)
   if (issues.length) throw new TypeError(`Invalid Colwork document at ${issues[0].path}: ${issues[0].message}`)
   const { row, column } = new SheetCoordinates(document).edits
-  if (row.length || column.length || Object.values(getSheetMaps(document)).some(map => map.size > 0)) throw new Error('Blank initialization requires an empty sheet')
+  if (row.length || column.length || [...Object.values(getSheetMaps(document)), ...Object.values(getSheetFeatureMaps(document))].some(map => map.size > 0)) throw new Error('Blank initialization requires an empty sheet')
   const metadata = document.getMap(COLWORK_MAP_NAMES.metadata)
   document.transact(() => {
     metadata.set('schemaVersion', COLWORK_SCHEMA_VERSION)
@@ -93,3 +95,4 @@ export function readSheetSnapshotUpdate(update: Uint8Array, limits?: SheetValida
   try { Y.applyUpdate(document, update); return readSheetSnapshot(document, limits) }
   finally { document.destroy() }
 }
+export { restoreWorkbookVersion } from './restoreVersion'

@@ -28,7 +28,11 @@ export function listWorkbookSheets(doc: Y.Doc): WorkbookSheet[] {
   const order = new Map(doc.getArray<string>(workbookOrderRoot).toArray().map((id, index) => [id, index]))
   const stored = [...entries].filter(([id, name]) => sheetIdPattern.test(id) && typeof name === 'string')
     .sort(([left], [right]) => (order.get(left) ?? -1) - (order.get(right) ?? -1) || left.localeCompare(right))
-  if (!entries.has(MAIN_SHEET_ID)) stored.unshift([MAIN_SHEET_ID, '工作表1'])
+  if (!entries.has(MAIN_SHEET_ID) && !order.has(MAIN_SHEET_ID)) stored.unshift([MAIN_SHEET_ID, '工作表1'])
+  if (!entries.has(MAIN_SHEET_ID) && order.has(MAIN_SHEET_ID)) {
+    const next = stored.findIndex(([id]) => (order.get(id) ?? -1) > order.get(MAIN_SHEET_ID)!)
+    stored.splice(next < 0 ? stored.length : next, 0, [MAIN_SHEET_ID, '工作表1'])
+  }
   if (!stored.length) return [{ id: MAIN_SHEET_ID, name: '工作表1' }]
   const names = new Set<string>()
   return stored.map(([id, value]) => {
@@ -66,4 +70,19 @@ export function removeWorkbookSheet(doc: Y.Doc, id: string) {
   const sheets = listWorkbookSheets(doc)
   if (!sheets.some(sheet => sheet.id === id) || sheets.length < 2) throw new Error('工作簿至少需要一张工作表')
   doc.getMap<string | null>(workbookRoot).set(id, null)
+}
+
+/** Moves a tab before another tab, or to the end if beforeId is omitted. */
+export function moveWorkbookSheet(doc: Y.Doc, id: string, beforeId?: string) {
+  const sheets = listWorkbookSheets(doc).map(sheet => sheet.id)
+  if (!sheets.includes(id) || (beforeId !== undefined && !sheets.includes(beforeId))) throw new RangeError('工作表不存在')
+  if (id === beforeId) return
+  const next = sheets.filter(sheet => sheet !== id)
+  next.splice(beforeId === undefined ? next.length : next.indexOf(beforeId), 0, id)
+  if (next.every((sheet, index) => sheet === sheets[index])) return
+  const order = doc.getArray<string>(workbookOrderRoot)
+  doc.transact(() => {
+    order.delete(0, order.length)
+    order.push(next)
+  })
 }

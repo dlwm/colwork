@@ -37,7 +37,7 @@ function App() {
     let table: ColworkTable | undefined
     saveUserSettings(applied, 'react').catch(() => undefined).finally(() => {
        if (active && tableRoot.current) {
-         table = new ColworkTable(tableRoot.current, { room: 'colwork-demo', user: applied.nickname, userColor: applied.color, transport, initializeAfterSync: cloudflareDeployment, websocketUrl: websocketUrl(applied), onLog: appendLog, viewPolicy: demoViewPolicy(applied.nickname), images: demoImages })
+         table = new ColworkTable(tableRoot.current, { room: 'colwork-demo', user: applied.nickname, userColor: applied.color, transport, initializeAfterSync: cloudflareDeployment, websocketChunks: cloudflareDeployment, websocketUrl: websocketUrl(applied), onLog: appendLog, viewPolicy: demoViewPolicy(applied.nickname), images: demoImages })
          tableRef.current = table
        }
     })

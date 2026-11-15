@@ -33,7 +33,7 @@
 .colwork-table__format--italic { font-style: italic; }
 .colwork-table__format--underline { text-decoration: underline; }
 .colwork-table__color { width: 24px; height: 24px; margin-left: 4px; border: 1px solid #cbd5e1; border-radius: 4px; padding: 2px; background: transparent; cursor: pointer; }
-.colwork-table__viewport { grid-area: 2 / 1; position: relative; width: 100%; height: min(560px, 55vh); min-height: 240px; overflow-x: auto; overflow-y: auto; scrollbar-gutter: stable; }
+.colwork-table__viewport { grid-area: 3 / 1; position: relative; width: 100%; height: min(560px, 55vh); min-height: 240px; overflow-x: auto; overflow-y: auto; scrollbar-gutter: stable; }
 .colwork-table__viewport:focus { outline: 0; }
 .colwork-table table { width: max-content; min-width: 100%; min-width: calc(900px * var(--colwork-zoom, 1)); border-collapse: separate; border-spacing: 0; table-layout: fixed; }
 .colwork-table th, .colwork-table td { border-top: 1px solid #edf0f3; border-right: 1px solid #edf0f3; padding: 0; text-align: left; }
@@ -94,7 +94,7 @@
 .colwork-table__context-menu button.is-destructive:hover { background: #fef2f2; }
 .colwork-table__border-control:focus-within .colwork-table__border-menu { display: flex; flex-direction: column; gap: 2px; }
 .colwork-table__frozen-boundary { position: absolute; z-index: 13; pointer-events: none; background: var(--colwork-freeze-color); }
-.colwork-table__frozen-boundaries { grid-area: 2 / 1; position: relative; align-self: start; justify-self: start; overflow: hidden; z-index: 13; pointer-events: none; }
+.colwork-table__frozen-boundaries { grid-area: 3 / 1; position: relative; align-self: start; justify-self: start; overflow: hidden; z-index: 13; pointer-events: none; }
 .colwork-table__frozen-boundary--row { height: 2px; box-shadow: 0 3px 5px var(--colwork-freeze-shadow); }
 .colwork-table__frozen-boundary--column { width: 2px; box-shadow: 3px 0 5px var(--colwork-freeze-shadow); }
 .colwork-table__row-view { max-width: calc(100vw - 32px); max-height: 85vh; border: 1px solid #dde3ea; border-radius: 12px; padding: 20px; color: #334155; font: 14px system-ui, sans-serif; }
@@ -113,3 +113,21 @@
   .colwork-table__toolbar { padding: 4px 8px; }
   .colwork-table__toolbar-row { gap: 6px 12px; }
 }
+
+.colwork-table__formula-bar { grid-area: 2 / 1; display: flex; gap: 8px; align-items: center; padding: 4px 12px; border-bottom: 1px solid #edf0f3; font: 12px system-ui, sans-serif; }
+.colwork-table__formula-bar span { min-width: 45px; color: #475569; }
+.colwork-table__formula-bar input { flex: 1; min-width: 0; padding: 4px 7px; border: 1px solid #dbe3ed; border-radius: 4px; font: inherit; }
+.colwork-table__feature-dialog { max-width: min(600px, calc(100vw - 32px)); max-height: 80vh; overflow: auto; border: 1px solid #dde3ea; border-radius: 12px; padding: 18px; font: 14px system-ui, sans-serif; }
+.colwork-table__feature-dialog::backdrop { background: #17203355; }
+.colwork-table__feature-dialog input, .colwork-table__feature-dialog button { margin: 3px; }
+
+.colwork-table__fill-handle { position: absolute; z-index: 4; right: 0; bottom: 0; width: 8px; height: 8px; border: 1px solid white; background: #2563eb; cursor: crosshair; }
+.colwork-table__viewport.is-filling, .colwork-table__viewport.is-filling td { cursor: crosshair; }
+
+.colwork-table__formula-bar button[hidden] { display: none; }
+.colwork-table__feature-dialog label { display: inline-flex; flex-direction: column; margin: 4px; vertical-align: top; }
+.colwork-table__feature-dialog select, .colwork-table__feature-dialog textarea { margin: 3px; }
+.colwork-table__analysis-result { max-height: 45vh; overflow: auto; }
+.colwork-table__analysis-result canvas { display: block; max-width: 100%; height: auto; }
+.colwork-table__analysis-result table { border-collapse: collapse; }
+.colwork-table__analysis-result :is(th, td) { padding: 4px 8px; border: 1px solid #dbe3ed; text-align: left; }

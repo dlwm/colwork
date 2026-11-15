@@ -6,3 +6,5 @@ export type { ColworkRowView, ColworkTableOptions, ColworkViewPolicy, ExternalCo
 export * from './model'
 export { cellKey, containsPosition, normalizeRange, rangeSize } from './range'
 export type { AwarenessSelection, SelectionMode } from './selection'
+export type { ColworkVersion, ColworkVersionPage, ColworkVersionContext, ColworkVersionHistory } from './versionHistory'
+export { createColworkWebSocket, waitForColworkSync } from './colworkWebSocket'

@@ -91,6 +91,8 @@ export class TableClipboard {
     const start = selection.focus
     if (rows.some((row, r) => row.some((_, c) => sheet.isCellLocked(cellKey({ row: start.row + r, column: start.column + c }))))) return
     const dimensions = this.host.dimensions()
+    if (rows.some((row, r) => row.some((value, c) => start.row + r < dimensions.rows && start.column + c < dimensions.columns
+      && !sheet.features.accepts(cellKey({ row: start.row + r, column: start.column + c }), normalizeCellText(value))))) return
     sheet.doc.transact(() => rows.forEach((row, r) => row.forEach((value, c) => {
       const position = { row: start.row + r, column: start.column + c }
       if (position.row >= dimensions.rows || position.column >= dimensions.columns) return

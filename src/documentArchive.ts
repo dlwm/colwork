@@ -9,16 +9,18 @@ export class DocumentArchive {
   private readonly updates: YjsUpdateRecord[] = []
   private readonly loggedPeers = new Set<object>()
   private readonly loggedSignals = new Set<object>()
-  constructor(private readonly sheet: SheetDocument, private readonly awareness: Awareness, private readonly provider: unknown, private readonly room: string | undefined, private readonly log: (message: string) => void, private readonly logging: boolean) {
+  constructor(private readonly sheet: SheetDocument, private readonly awareness: Awareness, private readonly provider: unknown, private readonly room: string | undefined, private readonly log: (message: string) => void, private readonly logging: boolean, private readonly recordUpdateLog: boolean) {
     sheet.doc.on('update', this.onUpdate)
     awareness.on('update', this.onAwarenessUpdate)
   }
   private readonly onUpdate = (update: Uint8Array, origin: unknown) => {
     this.revision++
-    this.updates.push({ seq: ++this.sequence, update: bytesToBase64(update), timestamp: Date.now() })
+    this.sequence++
+    if (this.recordUpdateLog) this.updates.push({ seq: this.sequence, update: bytesToBase64(update), timestamp: Date.now() })
     if (!this.logging) return
     const internal = this.provider as { room?: unknown } | undefined
     this.logChunk(`yjs:${origin === internal?.room ? 'recv' : 'send'}`, update)
+    if (update.byteLength > 64 * 1024) return
     const { cells, rowHeights, columnWidths, merges } = this.sheet
     this.log(`yjs:state ${JSON.stringify({ cells: [...cells], rowHeights: [...rowHeights], columnWidths: [...columnWidths], merges: [...merges] })}`)
   }
@@ -35,8 +37,8 @@ export class DocumentArchive {
     this.awareness.off('update', this.onAwarenessUpdate)
   }
   logChunk(label: string, data: Uint8Array) {
-    const hex = Array.from(data, (byte) => byte.toString(16).padStart(2, '0')).join(' ')
-    this.log(`${label} bytes=${data.byteLength} hex=${hex}`)
+    const hex = Array.from(data.subarray(0, 4096), (byte) => byte.toString(16).padStart(2, '0')).join(' ')
+    this.log(`${label} bytes=${data.byteLength} hex=${hex}${data.length > 4096 ? ' …' : ''}`)
   }
 
   inspectConnections() {

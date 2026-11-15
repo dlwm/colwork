@@ -7,6 +7,7 @@ import { SheetCoordinates, type ProjectedMap, type SheetAxis } from './sheetCoor
 import { FormulaBook } from './formulas'
 import { MAIN_SHEET_ID } from './workbookModel'
 import type { ColworkRowView } from './options'
+import { SheetFeatures } from './sheetFeatures'
 import { imageLabel, readCellImage } from './cellImage'
 
 const rowCollator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' })
@@ -21,19 +22,24 @@ export class SheetDocument {
   readonly locks: ProjectedMap<string>
   readonly coordinates: SheetCoordinates
   readonly formulas: FormulaBook
+  readonly features: SheetFeatures
   private mergeCache?: CellRange[]
   private readonly onMergesChange = () => { this.mergeCache = undefined }
   private readonly beforeObservers = (transaction: Y.Transaction) => {
     if (transaction.changed.size) this.formulas.reset()
     const { row, column } = this.coordinates.edits
+    const changed = new Set<unknown>(transaction.changed.keys())
+    if (Object.values(this.features.maps).some(map => changed.has(map))) this.features.invalidate()
     if (!transaction.changed.has(row) && !transaction.changed.has(column)) return
     this.coordinates.invalidate()
+    this.features.invalidate()
     this.mergeCache = undefined
   }
 
   constructor(readonly doc: Y.Doc, readonly origin: unknown = null, readonly sheetId = MAIN_SHEET_ID) {
     this.coordinates = new SheetCoordinates(doc, sheetId)
     this.formulas = new FormulaBook(doc)
+    this.features = new SheetFeatures(doc, sheetId, this.coordinates)
     const maps = this.coordinates.project(getSheetMaps(doc, sheetId))
     this.cells = maps.cells
     this.styles = maps.styles
@@ -69,33 +75,51 @@ export class SheetDocument {
 
   applyRowView(view: ColworkRowView) {
     this.coordinates.setRowOrder(undefined)
+    this.features.invalidate()
     this.mergeCache = undefined
     const filters = (view.filters ?? []).map(filter => ({ ...filter, contains: filter.contains.toLowerCase() }))
     if (!view.sort && !filters.length) return
-    if (this.getMergeRanges().some(range => range.start.row !== range.end.row)) throw new Error('跨行合并的工作表暂不支持排序筛选')
     const extent = this.getContentSize().rows
     if (extent > 100000) throw new RangeError('排序筛选最多处理十万行')
+    const joins = new Int32Array(extent)
+    for (const { start, end } of this.getMergeRanges()) joins[start.row] = Math.max(joins[start.row], end.row)
     const header = Math.min(extent, view.headerRows ?? 0)
-    const rows = Array.from({ length: extent - header }, (_, index) => index + header).filter(row =>
-      filters.every(filter => this.displayCell(`${row}:${filter.column}`).toLowerCase().includes(filter.contains)))
+    const fixed: number[] = []
+    const groups: Array<{ rows: number[]; value: string }> = []
+    for (let start = 0; start < extent;) {
+      let end = Math.max(start, joins[start])
+      for (let row = start + 1; row <= end; row++) end = Math.max(end, joins[row])
+      const rows = Array.from({ length: end - start + 1 }, (_, index) => start + index)
+      if (start < header) rows.forEach(row => fixed.push(row))
+      else if (rows.some(row => filters.every(filter => this.displayCell(`${row}:${filter.column}`).toLowerCase().includes(filter.contains)))) {
+        let value = ''
+        if (view.sort) {
+          for (const row of rows) {
+            value = this.displayCell(`${row}:${view.sort.column}`)
+            if (value) break
+          }
+        }
+        groups.push({ rows, value })
+      }
+      start = end + 1
+    }
     if (view.sort) {
-      const { column, direction } = view.sort
-      const values = new Map(rows.map(row => [row, this.displayCell(`${row}:${column}`)]))
-      rows.sort((a, b) => {
-        const left = values.get(a)!, right = values.get(b)!
+      const direction = view.sort.direction === 'asc' ? 1 : -1
+      groups.sort((a, b) => {
+        const left = a.value, right = b.value
         if (!left || !right) return Number(!left) - Number(!right)
         const numeric = left.trim() && right.trim() && Number.isFinite(Number(left)) && Number.isFinite(Number(right))
-        const compare = numeric ? Number(left) - Number(right) : rowCollator.compare(left, right)
-        return compare * (direction === 'asc' ? 1 : -1) || a - b
+        return (numeric ? Number(left) - Number(right) : rowCollator.compare(left, right)) * direction
       })
     }
-    this.coordinates.setRowOrder([...Array.from({ length: header }, (_, index) => index), ...rows], extent, filters.length > 0)
+    this.coordinates.setRowOrder(fixed.concat(groups.flatMap(group => group.rows)), extent, filters.length > 0)
     this.mergeCache = undefined
   }
 
   getContentSize() {
-    let rows = this.coordinates.extent('row')
-    let columns = this.coordinates.extent('column')
+    const { rows: featureRows, columns: featureColumns } = this.features.extent()
+    let rows = Math.max(featureRows, this.coordinates.extent('row'))
+    let columns = Math.max(featureColumns, this.coordinates.extent('column'))
     for (const key of [...this.cells.keys(), ...this.styles.keys(), ...this.locks.keys()]) {
       const position = parseCellKey(key)
       if (!position) continue

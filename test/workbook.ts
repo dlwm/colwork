@@ -1,10 +1,11 @@
 import * as Y from 'yjs'
 import { Awareness } from 'y-protocols/awareness'
 import { WebsocketProvider } from 'y-websocket'
-import { ColworkWorkbook, getSheetMaps, setWorkbookSheetName } from '../src/index'
+import { ColworkWorkbook, createColworkWebSocket, waitForColworkSync, getSheetMaps, setWorkbookSheetName } from '../src/index'
 import { downloadXlsx, importWorkbookFile } from './workbook-files'
 import { FormulaBook } from '../src/formulas'
 import { cloudflareDeployment } from './user-settings'
+import { demoVersionHistory } from './version-history'
 import { demoImages } from './demo-images'
 import './test.css'
 
@@ -18,7 +19,7 @@ const websocketUrl = cloudflareDeployment
   ? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/rooms`
   : 'ws://127.0.0.1:1234'
 const provider = room && /^[A-Za-z0-9_-]{1,64}$/.test(room)
-  ? new WebsocketProvider(websocketUrl, `workbook-${room}`, documentModel, { awareness, connect: false, disableBc: true })
+  ? new WebsocketProvider(websocketUrl, `workbook-${room}`, documentModel, { awareness, connect: false, disableBc: true, WebSocketPolyfill: cloudflareDeployment ? createColworkWebSocket() : undefined })
   : undefined
 
 function seed() {
@@ -41,7 +42,7 @@ function seed() {
 
 if (!provider) seed()
 const workbook = new ColworkWorkbook(document.querySelector('#table')!, {
-  collaboration: { document: documentModel, awareness }, user: '示例查看者', readOnly: !!provider, images: demoImages,
+  recordUpdateLog: false, collaboration: { document: documentModel, awareness }, user: '示例查看者', personalViewKey: `workbook-demo:${room ?? 'local'}`, readOnly: !!provider, images: demoImages, versionHistory: provider ? undefined : demoVersionHistory(documentModel),
 })
 let busy = false
 function updateControls() {
@@ -73,11 +74,12 @@ input.onchange = () => {
   if (!file) return
   void run(async () => {
     workbook.commitEditing()
-    const [sheet] = await importWorkbookFile(documentModel, file, provider ? () => provider.synced : undefined)
+    const [sheet] = await importWorkbookFile(documentModel, file, provider ? () => provider.synced : undefined, cloudflareDeployment, demoImages,
+      provider && cloudflareDeployment ? () => waitForColworkSync(provider.ws!) : undefined)
     workbook.setActiveSheet(sheet)
   })
 }
 download.onclick = () => void run(async () => {
   workbook.commitEditing()
-  await downloadXlsx(documentModel)
+  await downloadXlsx(documentModel, demoImages)
 })

@@ -6,7 +6,7 @@ const hostCss = `
     all: initial !important;
     display: block !important;
     position: relative !important;
-    grid-area: 2 / 1 !important;
+    grid-area: 3 / 1 !important;
     place-self: stretch !important;
     min-width: 0 !important;
     min-height: 0 !important;

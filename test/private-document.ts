@@ -1,7 +1,7 @@
 import * as Y from 'yjs'
 import { Awareness } from 'y-protocols/awareness'
 import { WebsocketProvider } from 'y-websocket'
-import { ColworkWorkbook, type ColworkViewPolicy } from '../src/index'
+import { ColworkWorkbook, createColworkWebSocket, waitForColworkSync, type ColworkViewPolicy } from '../src/index'
 import { downloadBlob, downloadXlsx, importWorkbookFile } from './workbook-files'
 import './test.css'
 
@@ -27,7 +27,7 @@ async function mountDocument() {
   const ydoc = new Y.Doc()
   const awareness = new Awareness(ydoc)
   const socketUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/rooms/private`
-  const provider = new WebsocketProvider(socketUrl, room, ydoc, { awareness, connect: false, disableBc: true })
+  const provider = new WebsocketProvider(socketUrl, room, ydoc, { awareness, connect: false, disableBc: true, WebSocketPolyfill: createColworkWebSocket() })
   let dirty = false
   let busy = false
   let expired = false
@@ -36,7 +36,7 @@ async function mountDocument() {
     input.disabled = expired || !access.canEdit || !provider.synced || busy
   }
   const table = new ColworkWorkbook(container, {
-    collaboration: { document: ydoc, awareness }, user: access.displayName,
+    recordUpdateLog: false, collaboration: { document: ydoc, awareness }, user: access.displayName,
     readOnly: true, viewPolicy: access.viewPolicy,
     onEditingChange(state) { dirty = state.dirty; updateDownload() },
   })
@@ -86,7 +86,7 @@ async function mountDocument() {
     busy = true
     updateDownload()
     try {
-      const [sheet] = await importWorkbookFile(ydoc, file, () => !expired && provider.synced && access.canEdit)
+      const [sheet] = await importWorkbookFile(ydoc, file, () => !expired && provider.synced && access.canEdit, true, undefined, () => waitForColworkSync(provider.ws!))
       table.setActiveSheet(sheet)
     } catch (error) { status.textContent = error instanceof Error ? error.message : '导入失败' }
     finally { busy = false; input.value = ''; updateDownload() }

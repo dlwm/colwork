@@ -14,6 +14,24 @@ import { chromium } from '@playwright/test'
 import { verifyDeployment } from '../../script/deploy-cloudflare.mjs'
 import { syncRequest, syncUpdate } from '../../server/cloudflare/protocol.mjs'
 import ExcelJS from 'exceljs'
+import { isSocketChunk, sendSocketMessage, SocketMessageReader } from '../../src/socketFrames.ts'
+
+class ChunkedTestSocket extends WebSocket {
+  reader = new SocketMessageReader()
+
+  send(data) { sendSocketMessage(data, frame => super.send(frame)) }
+
+  emit(event, data, ...args) {
+    if (event === 'message' && args[0]) {
+      const bytes = data instanceof Uint8Array ? data : new Uint8Array(data)
+      if (isSocketChunk(bytes) || this.reader.bytes) {
+        const message = this.reader.read(bytes)
+        return message ? super.emit(event, message.buffer, ...args) : true
+      }
+    }
+    return super.emit(event, data, ...args)
+  }
+}
 
 const testSessionSecret = 'colwork-local-integration-session-key'
 function sessionToken(documents, options = {}) {
@@ -63,9 +81,9 @@ test('Cloudflare runtime: HTTP, Yjs, presence, room isolation, browser and resta
       try { return (await fetch(`${base}/health`)).ok } catch { return false }
     })
   }
-  async function connect(room, id = 'test-user') {
+  async function connect(room, id = 'test-user', chunked = false) {
     const doc = new Y.Doc()
-    const provider = new WebsocketProvider(base.replace('http:', 'ws:') + '/rooms', encodeURIComponent(room), doc, { WebSocketPolyfill: WebSocket, disableBc: true, params: { userId: id } })
+    const provider = new WebsocketProvider(base.replace('http:', 'ws:') + '/rooms', encodeURIComponent(room), doc, { WebSocketPolyfill: chunked ? ChunkedTestSocket : WebSocket, disableBc: true, params: { userId: id, ...(chunked ? { colworkChunks: '1' } : {}) } })
     const client = { doc, provider }
     clients.push(client)
     await until(() => provider.synced)
@@ -133,6 +151,7 @@ test('Cloudflare runtime: HTTP, Yjs, presence, room isolation, browser and resta
     await react.goto(base)
     await react.getByRole('link', { name: '打开 React 示例' }).click()
     await until(async () => (await cell(react).textContent())?.includes('浏览器持久化测试'))
+    await cell(vue).click()
     await vue.getByRole('button', { name: '保护', exact: true }).click()
     await vue.locator('.colwork-table__context-menu').getByRole('button', { name: '锁定选区', exact: true }).click()
     await until(async () => (await cell(react).getAttribute('aria-readonly')) === 'true')
@@ -150,6 +169,51 @@ test('Cloudflare runtime: HTTP, Yjs, presence, room isolation, browser and resta
     await react.getByRole('link', { name: '返回首页' }).click()
     assert.equal(await react.getByRole('heading', { name: 'Colwork.' }).count(), 1)
     await vue.close(); await react.close()
+  })
+  await t.test('browser Excel import reaches peers above the old message limit and survives reconnect', async () => {
+    const room = 'chunked-excel'
+    const writer = await browser.newPage()
+    const reader = await browser.newPage()
+    try {
+      const path = `${base}/test/workbook?room=${room}`
+      await writer.goto(path)
+      await writer.locator('#import').waitFor()
+      await until(() => writer.locator('#import').isEnabled())
+      const workbook = new ExcelJS.Workbook()
+      const sheet = workbook.addWorksheet('Large import')
+      const text = 'synthetic workbook '.repeat(60)
+      for (let row = 1; row <= 1200; row++) sheet.getCell(`A${row}`).value = text + row
+      assert.ok(Buffer.byteLength(text) * 1200 > 1024 * 1024)
+      await writer.locator('#import').setInputFiles({
+        name: 'large.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        buffer: Buffer.from(await workbook.xlsx.writeBuffer()),
+      })
+      await until(async () => (await writer.locator('#status').textContent()) === '操作完成')
+      await reader.goto(path)
+      const tab = reader.getByRole('button', { name: 'Large import', exact: true })
+      await tab.click()
+      const first = reader.locator('td[data-key="0:0"] .colwork-table__cell-value')
+      await until(async () => (await first.textContent()) === text + '1')
+      await reader.reload()
+      await tab.click()
+      await until(async () => (await first.textContent()) === text + '1')
+    } finally { await writer.close(); await reader.close() }
+  })
+  await t.test('offline edits above one MiB catch up through a chunked sync-step reply', async () => {
+    const writer = await connect('offline-chunked', 'writer', true)
+    const reader = await connect('offline-chunked', 'reader', true)
+    const text = 'offline cell text '.repeat(60)
+    writer.provider.disconnect()
+    await until(() => !writer.provider.wsconnected)
+    writer.doc.transact(() => {
+      for (let row = 0; row < 1200; row++) writer.doc.getMap('cells').set(`${row}:0`, text + row)
+    })
+    assert.equal(reader.doc.getMap('cells').size, 0)
+    writer.provider.connect()
+    await until(() => reader.doc.getMap('cells').size === 1200)
+    assert.equal(reader.doc.getMap('cells').get('1199:0'), text + '1199')
+    for (let i = 0; i < 130; i++) writer.doc.getMap('cells').set('0:1', String(i))
+    await until(() => reader.doc.getMap('cells').get('0:1') === '129')
   })
   await t.test('large document and protection survive Worker restart', async () => {
     const map = second.doc.getMap('cells')
@@ -171,6 +235,15 @@ test('Cloudflare runtime: HTTP, Yjs, presence, room isolation, browser and resta
     const demo = await connect('colwork-demo')
     assert.equal(demo.doc.getMap('cells').size, 0)
     assert.equal(demo.doc.getMap('colwork-metadata').get('initialized'), true)
+    const offline = await connect('offline-chunked', 'after-restart', true)
+    assert.equal(offline.doc.getMap('cells').size, 1201)
+    assert.equal(offline.doc.getMap('cells').get('0:1'), '129')
+    const chunked = await browser.newPage()
+    try {
+      await chunked.goto(`${base}/test/workbook?room=chunked-excel`)
+      await chunked.getByRole('button', { name: 'Large import', exact: true }).click()
+      assert.match(await chunked.locator('td[data-key="0:0"]').textContent(), /synthetic workbook/)
+    } finally { await chunked.close() }
   })
   await t.test('protected documents verify login, isolate rooms, and enforce export and write access', async () => {
     const room = 'staff-sheet'

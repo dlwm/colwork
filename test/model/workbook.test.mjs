@@ -91,3 +91,75 @@ test('imports valid XLSX parts that use a prefix for SpreadsheetML tags', async 
     assert.equal(readSheetSnapshot(doc, {}, ids[1]).cells['0:0'], "=SUM('Rates'!A1:A2)")
   } finally { doc.destroy() }
 })
+
+test('Excel picture bytes and common rules round-trip through host image callbacks', async () => {
+  const workbook = new ExcelJS.Workbook()
+  const sheet = workbook.addWorksheet('Assets')
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6CYAAAAASUVORK5CYII=', 'base64')
+  sheet.addImage(workbook.addImage({ extension: 'png', buffer: png }), 'B2:B2')
+  sheet.getCell('A1').dataValidation = { type: 'list', formulae: ['"Accepted,Rejected"'], allowBlank: true }
+  sheet.addConditionalFormatting({ ref: 'C1:C3', rules: [{ type: 'cellIs', operator: 'greaterThan', formulae: [5], priority: 1,
+    style: { fill: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFEDCBA' } } } }] })
+  const doc = new Y.Doc()
+  try {
+    const [id] = await importXlsx(doc, arrayBuffer(await workbook.xlsx.writeBuffer()), {
+      async uploadImage({ bytes, mimeType }) {
+        assert.equal(mimeType, 'image/png')
+        assert.deepEqual(Buffer.from(bytes), png)
+        return { id: 'image-asset-1', alt: 'Attachment' }
+      },
+    })
+    assert.match(readSheetSnapshot(doc, {}, id).cells['1:1'], /image-asset-1/)
+    const output = new ExcelJS.Workbook()
+    await output.xlsx.load(arrayBuffer(await exportXlsx(doc, { async readImage(image) {
+      assert.equal(image.id, 'image-asset-1')
+      return { bytes: png, mimeType: 'image/png' }
+    } })))
+    const restored = output.getWorksheet('Assets')
+    assert.deepEqual(restored.getCell('A1').dataValidation.formulae, ['"Accepted,Rejected"'])
+    assert.equal(restored.conditionalFormattings[0].rules[0].style.fill.fgColor.argb, 'FFFEDCBA')
+    assert.equal(restored.getImages().length, 1)
+    assert.deepEqual(output.getImage(restored.getImages()[0].imageId).buffer, png)
+  } finally { doc.destroy() }
+})
+
+test('Excel evaluates conditional sums, counts, and lookup fallbacks during export', async () => {
+  const doc = new Y.Doc()
+  try {
+    const maps = getSheetMaps(doc)
+    for (const [key, value] of Object.entries({
+      '0:0': 'open', '0:1': '20', '0:2': 'Red',
+      '1:0': 'open', '1:1': '2', '1:2': 'Blue',
+      '2:0': 'closed', '2:1': '40', '2:2': 'Green',
+      '0:3': '=SUMIFS(B1:B3,A1:A3,"open",B1:B3,">5")',
+      '1:3': '=COUNTIFS(A1:A3,"o*",B1:B3,">1")',
+      '2:3': '=XLOOKUP("closed",A1:A3,C1:C3,"missing")',
+      '3:3': '=_xlfn.XLOOKUP("missing",A1:A3,C1:C3,"fallback")',
+    })) maps.cells.set(key, value)
+    const output = new ExcelJS.Workbook()
+    await output.xlsx.load(arrayBuffer(await exportXlsx(doc)))
+    assert.deepEqual([1, 2, 3, 4].map(row => output.getWorksheet(1).getCell(`D${row}`).result), [20, 2, 'Green', 'fallback'])
+  } finally { doc.destroy() }
+})
+
+test('a host restore updates connected peers and preserves host-owned roots', async () => {
+  const { addWorkbookSheet, moveWorkbookSheet, restoreWorkbookVersion } = await import('../../dist/model.js')
+  const live = new Y.Doc()
+  const peer = new Y.Doc()
+  try {
+    const additional = addWorkbookSheet(live, 'Second')
+    moveWorkbookSheet(live, additional, 'main')
+    getSheetMaps(live).cells.set('0:0', 'saved value')
+    const snapshot = Y.encodeStateAsUpdate(live)
+    getSheetMaps(live).cells.set('0:0', 'current value')
+    const transient = addWorkbookSheet(live, 'Temporary')
+    live.getMap('host-only').set('revision', 45)
+    Y.applyUpdate(peer, Y.encodeStateAsUpdate(live))
+    live.on('update', update => Y.applyUpdate(peer, update))
+    restoreWorkbookVersion(live, snapshot)
+    assert.deepEqual(listWorkbookSheets(peer).map(sheet => sheet.id), [additional, 'main'])
+    assert.equal(getSheetMaps(peer).cells.get('0:0'), 'saved value')
+    assert.equal(peer.getMap('host-only').get('revision'), 45)
+    assert.equal(listWorkbookSheets(peer).some(sheet => sheet.id === transient), false)
+  } finally { live.destroy(); peer.destroy() }
+})
