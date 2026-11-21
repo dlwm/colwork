@@ -105,8 +105,9 @@ export class FormulaBook {
 
   shift(value: string, sheetId: string, rows: number, columns: number) {
     if (!value.startsWith('=') && !value.startsWith(marker)) return value
+    if (value.startsWith('=') && value.length > 8192) return value
     const parts = decodeFormula(value) ?? (value.startsWith('=') ? this.bind(value.slice(1), sheetId) : undefined)
-    if (!parts) return value
+    if (!parts || parts.length > 2048) return value
     return marker + JSON.stringify(parts.map(part => {
       if (typeof part === 'string' || !part.key || !part.sheet) return part
       const coordinates = this.sheet(part.sheet).coordinates

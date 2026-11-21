@@ -115,3 +115,26 @@ test('an insertion survives concurrent deletion of the original row it was inser
   expect(a).toEqual(b)
   expect(a.cells).toEqual({ '0:0': 'Inserted before a deleted row', '1:0': 'Next' })
 })
+
+test('overlapping offline merges converge and unmerging clears the conflicting candidates', async ({ page }) => {
+  await mountPeers(page)
+  await page.evaluate(() => {
+    leftTable.selection.selectRange({ row: 0, column: 0 }, { row: 0, column: 2 })
+    rightTable.selection.selectRange({ row: 0, column: 1 }, { row: 1, column: 1 })
+  })
+  for (const side of ['table', 'peer']) {
+    await page.locator(`#${side}`).getByRole('button', { name: '合并', exact: true }).click()
+  }
+  await page.evaluate(() => exchange())
+  for (const side of ['table', 'peer']) {
+    await expect(cell(page, side, '0:0')).toHaveAttribute('colspan', '3')
+    await expect(cell(page, side, '1:1')).toBeVisible()
+  }
+  await page.evaluate(() => leftTable.setRowView({ sort: { column: 0, direction: 'asc' } }))
+  await expect(cell(page, 'table', '1:0')).toHaveAttribute('colspan', '3')
+  await cell(page, 'table', '1:0').click()
+  await page.locator('#table').getByRole('button', { name: '拆分', exact: true }).click()
+  await page.evaluate(() => exchange())
+  await expect(cell(page, 'peer', '0:1')).not.toHaveAttribute('rowspan', /.+/)
+  expect(await page.evaluate(() => sheetState().map(sheet => sheet.merges.length))).toEqual([0, 0])
+})

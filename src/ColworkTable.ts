@@ -1,3 +1,4 @@
+import { readWorkbookSnapshot } from './model'
 import { TableDimensions } from './tableDimensions'
 import { bindBuiltInSynchronization } from './builtInSynchronization'
 import { refreshValues, refreshSelection, refreshStyles, refreshCursors } from './refreshTable'
@@ -28,6 +29,7 @@ import { openFindReplace } from './findReplace'
 import { excelColumn } from './formulas'
 import { getViewportOffset } from './viewport'
 import { normalizeCellText } from './unicode'
+import { workbookUndo } from './workbookUndo'
 import { openAnalysisDialog, openRuleDialog } from './dataTools'
 import { isAnalysis, isConditionalFormat, isDataValidation, readFeature } from './sheetFeatures'
 import { makeSheetId } from './workbookModel'
@@ -193,7 +195,7 @@ export class ColworkTable {
   }
   private readonly onLocksChange = () => {
     // Old history must not restore content underneath a newly received lock.
-    this.undoManager.clear()
+    if (!workbookUndo.has(this.root)) this.undoManager.clear()
     if (this.editing.key && this.sheet.isCellLocked(this.editing.key)) this.editing.finish(false)
     if (this.resizing && this.sheet.isAxisLocked(this.resizing.axis, this.resizing.index)) {
       this.resizing = undefined
@@ -400,7 +402,8 @@ export class ColworkTable {
     this.editing = new CellEditor({
       id: key => this.sheet.coordinates.cellId(key), position: id => this.sheet.coordinates.cellKey(id),
       table: this.table, canEdit: key => !this.readOnly && !this.destroyed && !this.sheet.isCellLocked(key),
-      read: key => this.sheet.readCell(key), write: (key, value) => this.writeInput(key, value),
+      read: key => this.sheet.readCell(key), readRaw: id => this.cells.raw.get(id),
+      write: (key, value, previous) => this.writeDraft(key, value, previous),
       applyStyle: this.applyCellStyle, renderContent: this.renderContent,
       announce: cursor => this.selection.sendAwareness(cursor), focus: () => this.selection.focus,
       clearEditingPresence: () => { if (!this.destroyed) this.session.finishEditing() },
@@ -413,7 +416,13 @@ export class ColworkTable {
     })
     this.clipboard = new TableClipboard({
       sheet: this.sheet, selection: this.selection, editing: this.editing, formatting: this.formatting,
-      canEdit: () => !this.readOnly && !this.destroyed, dimensions: () => ({ rows: this.rowCount, columns: this.columnCount }),
+      canEdit: () => !this.readOnly && !this.destroyed,
+      resize: (rows, columns) => {
+        this.dimensions.rows = Math.max(this.dimensions.rows, rows)
+        this.dimensions.columns = Math.max(this.dimensions.columns, columns)
+      },
+      reject: message => this.dialogs.showLockMessage(message),
+      stopCapturing: () => this.undoManager.stopCapturing(),
       pasteImage: options.images?.upload ? file => this.uploadFromView(file) : undefined,
       render: () => this.render(), origin: this,
     })
@@ -496,7 +505,7 @@ export class ColworkTable {
       this.versionDialog = new VersionHistoryDialog(root, options.versionHistory, () => !this.readOnly && !this.destroyed, () => {
         this.commitEditing()
         return this.canExport() ? this.archive.snapshot() : undefined
-      })
+      }, () => readWorkbookSnapshot(this.doc, { allowUnknownRoots: true }))
       const history = document.createElement('button')
       history.type = 'button'
       history.className = 'colwork-table__format'
@@ -515,7 +524,21 @@ export class ColworkTable {
     if (shouldSeedDemo && !options.initializeAfterSync) seedDemoFormatting(this.sheet)
     this.expandLogicalSizeFromDocument()
     const { row, column } = this.sheet.coordinates.edits
-    this.undoManager = new Y.UndoManager([this.cells.raw, this.styles.raw, this.rowHeights.raw, this.columnWidths.raw, this.merges.raw, ...Object.values(this.sheet.features.maps), row, column], { captureTimeout: 500, trackedOrigins: this.session.external ? new Set([this]) : new Set([null, this]) })
+    const histories = workbookUndo.get(root)
+    const history = histories?.get(this.sheet.sheetId)
+    this.undoManager = history?.manager ?? new Y.UndoManager(
+      [this.cells.raw, this.styles.raw, this.rowHeights.raw, this.columnWidths.raw, this.merges.raw, ...Object.values(this.sheet.features.maps), row, column],
+      { captureTimeout: 500, trackedOrigins: this.session.external ? new Set([this]) : new Set([null, this]) },
+    )
+    this.undoManager.addTrackedOrigin(this)
+    if (histories && !history) {
+      const manager = this.undoManager, locks = this.locks.raw
+      const clear = () => manager.clear()
+      locks.observe(clear)
+      histories.set(this.sheet.sheetId, {
+        manager, dispose() { locks.unobserve(clear); manager.clear(); manager.destroy() },
+      })
+    }
     this.undoManager.on('stack-item-added', this.onHistoryChange)
     this.undoManager.on('stack-item-popped', this.onHistoryChange)
     this.undoManager.on('stack-cleared', this.onHistoryChange)
@@ -692,12 +715,19 @@ export class ColworkTable {
     this.formulaDraft = undefined
     if (draft && commit && !this.destroyed && !this.readOnly && draft.value !== this.formulaInput.value) {
       const position = this.sheet.coordinates.cellKey(draft.id)
-      if (position && this.cells.raw.get(draft.id) === draft.raw && !this.sheet.isCellLocked(position)) {
-        this.writeInput(position, normalizeCellText(this.formulaInput.value))
+      if (position && !this.sheet.isCellLocked(position)) {
+        this.writeDraft(position, this.formulaInput.value, draft.raw)
       }
     }
     this.refreshFormulaBar()
     if (draft) this.options.onEditingChange?.({ editing: false, dirty: false })
+  }
+
+  private writeDraft(key: string, draft: string, previous: string | undefined) {
+    const value = normalizeCellText(draft)
+    if (value === this.sheet.readCell(key)) return
+    if (this.cells.get(key) !== previous && !this.root.ownerDocument.defaultView?.confirm('此单元格在编辑期间已更新。确定覆盖最新内容？')) return
+    this.writeInput(key, value)
   }
 
   private writeInput(key: string, value: string) {
@@ -1155,9 +1185,7 @@ export class ColworkTable {
     }
     this.dialogs.closeLockMessage()
     this.doc.transact(() => {
-      this.sheet.getMergeRanges().forEach((existing) => {
-        if (containsPosition(range, existing.start) || containsPosition(existing, range.start)) this.merges.delete(this.sheet.mergeKey(existing))
-      })
+      this.sheet.removeMergesIntersecting(range)
       this.merges.set(this.sheet.mergeKey(range), '1')
     }, this)
   }
@@ -1165,9 +1193,7 @@ export class ColworkTable {
   private unmergeSelection() {
     if (this.readOnly || this.selectionHasLocks()) return
     const range = selectionRange(this.selection.anchor, this.selection.focus)
-    this.doc.transact(() => this.sheet.getMergeRanges().forEach((existing) => {
-      if (containsPosition(range, existing.start) || containsPosition(existing, range.start)) this.merges.delete(this.sheet.mergeKey(existing))
-    }), this)
+    this.doc.transact(() => this.sheet.removeMergesIntersecting(range), this)
   }
 
   private modifyAxis(axis: 'row' | 'column', index: number, amount: number, removeCount = 0) {
@@ -1310,7 +1336,9 @@ export class ColworkTable {
     document.removeEventListener('mousedown', this.onDocumentMouseDown)
     this.menu.hide()
     if (this.renderFrame !== undefined) cancelAnimationFrame(this.renderFrame)
-    this.undoManager.destroy()
+    this.undoManager.stopCapturing()
+    this.undoManager.removeTrackedOrigin(this)
+    if (!workbookUndo.has(this.root)) this.undoManager.destroy()
     this.sheet.destroy()
     this.session.destroy()
     this.root.replaceChildren()

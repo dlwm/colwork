@@ -131,3 +131,12 @@
 .colwork-table__analysis-result canvas { display: block; max-width: 100%; height: auto; }
 .colwork-table__analysis-result table { border-collapse: collapse; }
 .colwork-table__analysis-result :is(th, td) { padding: 4px 8px; border: 1px solid #dbe3ed; text-align: left; }
+
+
+.colwork-table__version-preview:empty { display: none; }
+.colwork-table__version-preview { min-width: 0; overflow-x: auto; }
+.colwork-table__version-preview details { margin: 8px 0; }
+.colwork-table__version-preview summary { cursor: pointer; }
+.colwork-table__version-preview table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.colwork-table__version-preview th, .colwork-table__version-preview td { padding: 4px 8px; border: 1px solid #dbe3ed; text-align: left; white-space: pre-wrap; overflow-wrap: anywhere; }
+.colwork-table__version-preview th:first-child { width: 6em; }

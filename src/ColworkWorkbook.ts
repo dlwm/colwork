@@ -1,8 +1,13 @@
+import type { Transaction } from 'yjs'
 import { ColworkTable } from './ColworkTable'
 import type { ColworkRowView, ColworkViewPolicy, ExternalCollaborationOptions } from './options'
-import { addWorkbookSheet, listWorkbookSheets, moveWorkbookSheet, removeWorkbookSheet, setWorkbookSheetName, workbookOrderRoot, workbookRoot } from './workbookModel'
+import { addWorkbookSheet, checkSheetCapacity, listWorkbookSheets, moveWorkbookSheet, removeWorkbookSheet, setWorkbookSheetName, workbookLayoutRoot, workbookOrderRoot, workbookRoot } from './workbookModel'
+import { workbookUndo } from './workbookUndo'
 
-export type ColworkWorkbookOptions = Omit<ExternalCollaborationOptions, 'transport' | 'sheetId'>
+export type ColworkWorkbookOptions = Omit<ExternalCollaborationOptions, 'transport' | 'sheetId'> & {
+  /** Optional limit for adding visible sheets through this editor. Enforce it on the host as well. */
+  maxSheets?: number
+}
 
 /** Shares workbook content while keeping the active tab and each tab's view local. */
 export class ColworkWorkbook {
@@ -19,6 +24,7 @@ export class ColworkWorkbook {
   private destroyed = false
 
   constructor(private readonly root: HTMLElement, private readonly options: ColworkWorkbookOptions) {
+    checkSheetCapacity(0, options.maxSheets)
     this.document = options.collaboration.document
     this.readOnly = options.readOnly === true
     this.viewPolicy = options.viewPolicy
@@ -30,16 +36,27 @@ export class ColworkWorkbook {
     this.status.className = 'colwork-workbook__status'
     this.status.setAttribute('role', 'status')
     this.container = doc.createElement('div')
+    workbookUndo.set(this.container, new Map())
     root.replaceChildren(this.tabs, this.status, this.container)
-    this.document.getMap(workbookRoot).observe(this.refresh)
-    this.document.getArray(workbookOrderRoot).observe(this.refresh)
+    this.document.on('afterTransaction', this.onWorkbookChange)
     this.refresh()
+  }
+
+  private readonly onWorkbookChange = (transaction: Transaction) => {
+    const changed = new Set<unknown>(transaction.changed.keys())
+    if ([workbookRoot, workbookOrderRoot, workbookLayoutRoot].some(name => changed.has(this.document.share.get(name)))) this.refresh()
   }
 
   private refresh = () => {
     if (this.destroyed) return
     const sheets = listWorkbookSheets(this.document)
     if (!sheets.some(sheet => sheet.id === this.sheetId)) this.mount(sheets[0].id, false)
+    const histories = workbookUndo.get(this.container)!
+    for (const [id, history] of histories) {
+      if (sheets.some(sheet => sheet.id === id)) continue
+      history.dispose()
+      histories.delete(id)
+    }
     const button = (label: string, action: () => void) => {
       const item = this.root.ownerDocument.createElement('button')
       item.type = 'button'
@@ -87,7 +104,7 @@ export class ColworkWorkbook {
       button('新增工作表', () => {
         let index = sheets.length + 1
         while (sheets.some(sheet => sheet.name === `工作表${index}`)) index++
-        this.setActiveSheet(addWorkbookSheet(this.document, `工作表${index}`))
+        this.setActiveSheet(addWorkbookSheet(this.document, `工作表${index}`, { maxSheets: this.options.maxSheets }))
       })
       button('重命名工作表', () => {
         const sheet = sheets.find(sheet => sheet.id === this.sheetId)!
@@ -131,6 +148,7 @@ export class ColworkWorkbook {
     if (this.destroyed || this.readOnly === value) return
     this.readOnly = value
     this.table?.setReadOnly(value)
+    for (const { manager } of workbookUndo.get(this.container)!.values()) manager.clear()
     this.refresh()
   }
 
@@ -146,9 +164,10 @@ export class ColworkWorkbook {
   destroy() {
     if (this.destroyed) return
     this.destroyed = true
-    this.document.getMap(workbookRoot).unobserve(this.refresh)
-    this.document.getArray(workbookOrderRoot).unobserve(this.refresh)
+    this.document.off('afterTransaction', this.onWorkbookChange)
     this.table?.destroy()
+    for (const history of workbookUndo.get(this.container)!.values()) history.dispose()
+    workbookUndo.delete(this.container)
     this.root.replaceChildren()
   }
 }

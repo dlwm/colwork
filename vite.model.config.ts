@@ -5,7 +5,8 @@ import { writeFile } from 'node:fs/promises'
 export default defineConfig({
   plugins: [dts({
     tsconfigPath: './tsconfig.lib.json', entryRoot: 'src',
-    include: ['src/model*.ts', 'src/range.ts', 'src/workbookModel.ts', 'src/xlsx.ts', 'src/yjsArchive.ts', 'src/yjsRebuild.ts'],
+    include: ['src/model*.ts', 'src/range.ts', 'src/workbookModel.ts', 'src/xlsx.ts', 'src/yjsArchive.ts', 'src/yjsRebuild.ts', 'src/cellImage.ts',
+      'src/sheetFeatures.ts', 'src/sheetCoordinates.ts', 'src/restoreVersion.ts'],
     beforeWriteFile(filePath, content) {
       return { filePath, content: content.replace(/(from\s+['"])(\.{1,2}\/[^'"]+)(['"])/g, '$1$2.js$3') }
     },

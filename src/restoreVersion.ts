@@ -1,54 +1,32 @@
 import * as Y from 'yjs'
-import { COLWORK_MAP_NAMES, type SheetValidationLimits } from './model-schema'
-import { validateSheetDocument } from './model-validation'
-import { axisRootNames } from './sheetCoordinates'
-import { featureRootNames } from './sheetFeatures'
-import { MAIN_SHEET_ID, normalizeSheetName, sheetIdPattern, workbookOrderRoot, workbookRoot } from './workbookModel'
+import type { WorkbookValidationLimits } from './model-schema'
+import { colworkRoot, validateWorkbook } from './model-validation'
+import { MAIN_SHEET_ID, sheetIdPattern, workbookRoot } from './workbookModel'
 
-const sequences = new Set<string>([workbookOrderRoot, ...Object.values(axisRootNames)])
-const maps = new Set<string>([workbookRoot, ...Object.values(COLWORK_MAP_NAMES), ...Object.values(featureRootNames)])
-
-function rootType(key: string): 'array' | 'map' | undefined {
-  const [prefix, id, name, extra] = key.split(':')
-  if (id !== undefined) {
-    if (prefix !== 'colwork-sheet' || id === MAIN_SHEET_ID || !sheetIdPattern.test(id) || !name || extra !== undefined
-      || name === workbookRoot || name === workbookOrderRoot) return
-    key = name
-  }
-  if (sequences.has(key)) return 'array'
-  if (maps.has(key)) return 'map'
-}
-
-/** Replaces visible Colwork state inside the existing collaborative document. */
+/** Replaces Colwork state in place. The host owns revision checks and stale-session fencing. */
 export function restoreWorkbookVersion(document: Y.Doc, update: Uint8Array, options: {
   origin?: unknown
-  limits?: SheetValidationLimits
+  limits?: WorkbookValidationLimits
 } = {}) {
   const saved = new Y.Doc()
   try {
     Y.applyUpdate(saved, update)
-    const ids = new Set([MAIN_SHEET_ID])
-    for (const name of saved.share.keys()) {
-      if (rootType(name) && name.startsWith('colwork-sheet:')) ids.add(name.split(':')[1])
-    }
-    const sheets = saved.getMap<string | null>(workbookRoot)
-    const order = saved.getArray<string>(workbookOrderRoot)
-    if (sheets._start !== null || order._map.size || order.toArray().some(id => typeof id !== 'string' || !sheetIdPattern.test(id))) {
-      throw new TypeError('Invalid workbook history')
-    }
-    for (const [id, name] of sheets) {
-      if (!sheetIdPattern.test(id) || (name !== null && typeof name !== 'string')) throw new TypeError('Invalid workbook sheet')
-      if (name !== null) normalizeSheetName(name)
-      ids.add(id)
-    }
-    for (const id of ids) {
-      const [issue] = validateSheetDocument(saved, { ...options.limits, allowUnknownRoots: true }, id)
-      if (issue) throw new TypeError(`Invalid Colwork version at ${issue.path}: ${issue.message}`)
-    }
+    const [issue] = validateWorkbook(saved, { ...options.limits, allowUnknownRoots: true })
+    if (issue) throw new TypeError(`Invalid Colwork version at ${issue.path}: ${issue.message}`)
     const names = new Set([...document.share.keys(), ...saved.share.keys()])
+    const savedSheets = saved.getMap<string | null>(workbookRoot)
+    const deletedSheets = new Set<string>()
+    for (const id of document.getMap(workbookRoot).keys()) {
+      if (id !== MAIN_SHEET_ID && sheetIdPattern.test(id) && !savedSheets.has(id)) deletedSheets.add(id)
+    }
+    // Yjs retains roots with deleted content even when encoding a fresh full update.
+    for (const name of names) {
+      const id = colworkRoot(name)?.sheetId
+      if (id && id !== MAIN_SHEET_ID && !savedSheets.has(id)) deletedSheets.add(id)
+    }
     // Materialize and inspect every root before starting the restoring transaction.
     const changes = [...names].flatMap(name => {
-      switch (rootType(name)) {
+      switch (colworkRoot(name)?.type) {
         case 'array': {
           const live = document.getArray<unknown>(name)
           const previous = live.toArray()
@@ -59,8 +37,19 @@ export function restoreWorkbookVersion(document: Y.Doc, update: Uint8Array, opti
         case 'map': {
           const live = document.getMap<unknown>(name), next = saved.getMap<unknown>(name)
           return [() => {
-            for (const key of live.keys()) if (!next.has(key)) live.delete(key)
-            for (const [key, value] of next) if (live.get(key) !== value) live.set(key, value)
+            for (const key of live.keys()) {
+              if (name === workbookRoot && deletedSheets.has(key)) continue
+              if (!next.has(key)) live.delete(key)
+            }
+            for (const [key, value] of next) {
+              const current = live.get(key)
+              if (Array.isArray(value)) {
+                if (!Array.isArray(current) || value.length !== current.length || value.some((id, index) => id !== current[index])) live.set(key, [...value])
+              } else if (current !== value) live.set(key, value)
+            }
+            if (name === workbookRoot) {
+              for (const id of deletedSheets) if (live.get(id) !== null) live.set(id, null)
+            }
           }]
         }
         default: return []

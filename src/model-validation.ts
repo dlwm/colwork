@@ -1,11 +1,11 @@
 import * as Y from 'yjs'
 import { isUnicodeString } from './unicode'
-import { COLWORK_MAP_NAMES, COLWORK_SCHEMA_VERSION, type CellStyle, type PasswordLock, type SheetMaps, type SheetValidationIssue, type SheetValidationLimits } from './model-schema'
+import { COLWORK_MAP_NAMES, COLWORK_SCHEMA_VERSION, type CellStyle, type PasswordLock, type SheetMaps, type SheetValidationIssue, type SheetValidationLimits, type WorkbookValidationLimits } from './model-schema'
 import { hasOverlappingMerges } from './model-merges'
 import type { CellRange } from './range'
 import { axisRootNames, parseAxisId, SheetCoordinates, type SheetAxis } from './sheetCoordinates'
 import { featureRootNames, getSheetFeatureMaps, isAnalysis, isConditionalFormat, isDataValidation, readFeature } from './sheetFeatures'
-import { sheetRoot, sheetIdPattern, workbookRoot, workbookOrderRoot } from './workbookModel'
+import { countVisibleSheets, sheetRoot, sheetIdPattern, normalizeSheetName, MAIN_SHEET_ID, workbookRoot, workbookOrderRoot, workbookLayoutRoot } from './workbookModel'
 
 const isRecord = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
 const knownKeys = (value: Record<string, unknown>, names: string[]) => Object.keys(value).every(key => names.includes(key))
@@ -41,24 +41,42 @@ export function getSheetMaps(document: Y.Doc, sheetId?: string): SheetMaps {
   }
 }
 
-export function validateSheetDocument(document: Y.Doc, limits: SheetValidationLimits = {}, sheetId?: string): SheetValidationIssue[] {
-  for (const key of ['maxRows', 'maxColumns', 'maxEntries', 'maxStringLength', 'maxMergeArea', 'maxMerges'] as const) {
+const sheetArrays = new Set<string>(Object.values(axisRootNames))
+const sheetMaps = new Set<string>([...Object.values(COLWORK_MAP_NAMES), ...Object.values(featureRootNames)])
+
+/** Classifies both legacy roots and the namespaced roots of registered sheets. */
+export function colworkRoot(key: string): { type: 'map' | 'array'; sheetId?: string } | undefined {
+  if (key === workbookOrderRoot) return { type: 'array' }
+  if (key === workbookRoot || key === workbookLayoutRoot) return { type: 'map' }
+  const [prefix, id, field, extra] = key.split(':')
+  if (id !== undefined && (prefix !== 'colwork-sheet' || id === MAIN_SHEET_ID || !sheetIdPattern.test(id) || !field || extra !== undefined)) return
+  const name = field ?? key
+  if (sheetArrays.has(name)) return { type: 'array', sheetId: id ?? MAIN_SHEET_ID }
+  if (sheetMaps.has(name)) return { type: 'map', sheetId: id ?? MAIN_SHEET_ID }
+}
+
+function validateLimits(limits: WorkbookValidationLimits) {
+  for (const key of ['maxRows', 'maxColumns', 'maxEntries', 'maxStringLength', 'maxMergeArea', 'maxMerges', 'maxSheets', 'maxRegisteredSheets'] as const) {
     const value = limits[key]
     if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) throw new RangeError(`${key} must be a non-negative safe integer`)
   }
+}
+
+export function validateSheetDocument(document: Y.Doc, limits: SheetValidationLimits = {}, sheetId?: string): SheetValidationIssue[] {
+  validateLimits(limits)
   const issues: SheetValidationIssue[] = []
   if (document.store.pendingStructs !== null || document.store.pendingDs !== null) {
     issues.push({ path: '$', message: 'Document contains unresolved Yjs update dependencies' })
   }
-  const issue = (path: string, message: string) => { issues.push({ path, message }) }
   if (!limits.allowUnknownRoots) {
-    const names = new Set<string>([...Object.values(COLWORK_MAP_NAMES), ...Object.values(axisRootNames), ...Object.values(featureRootNames)])
-    for (const key of document.share.keys()) {
-      if (key === workbookRoot || key === workbookOrderRoot || names.has(key)) continue
-      const [prefix, id, name, extra] = key.split(':')
-      if (prefix !== 'colwork-sheet' || !sheetIdPattern.test(id ?? '') || !names.has(name) || extra !== undefined) issue(key, 'Unknown document root')
-    }
+    for (const key of document.share.keys()) if (!colworkRoot(key)) issues.push({ path: key, message: 'Unknown document root' })
   }
+  return issues.concat(validateSheetRoots(document, limits, sheetId))
+}
+
+function validateSheetRoots(document: Y.Doc, limits: SheetValidationLimits, sheetId?: string): SheetValidationIssue[] {
+  const issues: SheetValidationIssue[] = []
+  const issue = (path: string, message: string) => { issues.push({ path, message }) }
   let maps: SheetMaps
   let metadata: Y.Map<unknown>
   let features: ReturnType<typeof getSheetFeatureMaps>
@@ -146,7 +164,7 @@ export function validateSheetDocument(document: Y.Doc, limits: SheetValidationLi
       merges.push(range)
     }
   })
-  if (hasOverlappingMerges(merges)) issue('merges', 'Merge ranges must not overlap')
+  if (limits.mergeConflicts !== 'resolve' && hasOverlappingMerges(merges)) issue('merges', 'Merge ranges must not overlap')
   const featureRangeValid = (key: string) => {
     const [start, end, extra] = key.split('-')
     const first = start && coordinates.cellPosition(start)
@@ -173,5 +191,81 @@ export function validateSheetDocument(document: Y.Doc, limits: SheetValidationLi
       if (typeof value !== 'boolean') issue('metadata.initialized', 'Expected a boolean')
     } else issue(`metadata.${key}`, 'Unknown metadata field')
   })
+  return issues
+}
+
+
+/** Validates all registered sheets, including retained roots of deleted sheets. */
+export function validateWorkbook(document: Y.Doc, limits: WorkbookValidationLimits = {}): SheetValidationIssue[] {
+  validateLimits(limits)
+  const issues: SheetValidationIssue[] = []
+  const issue = (path: string, message: string) => { issues.push({ path, message }) }
+  if (document.store.pendingStructs !== null || document.store.pendingDs !== null) issue('$', 'Document contains unresolved Yjs update dependencies')
+  let entries: Y.Map<unknown>
+  let order: Y.Array<unknown>
+  let layout: Y.Map<unknown>
+  try {
+    entries = document.getMap(workbookRoot)
+    order = document.getArray(workbookOrderRoot)
+    layout = document.getMap(workbookLayoutRoot)
+  } catch {
+    issue('$', 'Invalid workbook metadata roots')
+    return issues
+  }
+  if (entries._start !== null) issue(workbookRoot, 'Expected map entries without sequence content')
+  if (order._map.size) issue(workbookOrderRoot, 'Expected sequence content without map entries')
+  if (layout._start !== null) issue(workbookLayoutRoot, 'Expected map entries without sequence content')
+
+  const ids = new Set([MAIN_SHEET_ID])
+  for (const [id, name] of entries) {
+    if (!sheetIdPattern.test(id)) {
+      issue(`${workbookRoot}.${id}`, 'Invalid sheet ID')
+      continue
+    }
+    ids.add(id)
+    if (name === null) continue
+    try {
+      if (typeof name !== 'string' || !isUnicodeString(name)) throw new TypeError()
+      normalizeSheetName(name)
+    } catch { issue(`${workbookRoot}.${id}`, 'Invalid sheet name') }
+  }
+  if (limits.maxSheets !== undefined && countVisibleSheets(entries) > limits.maxSheets) issue(workbookRoot, 'Workbook exceeds maxSheets')
+  if (limits.maxRegisteredSheets !== undefined && ids.size > limits.maxRegisteredSheets) issue(workbookRoot, 'Workbook exceeds maxRegisteredSheets')
+  const validId = (id: unknown): id is string => typeof id === 'string' && ids.has(id)
+  // Old peers could concurrently rewrite the array, producing repeated valid IDs.
+  order.forEach((id, index) => {
+    if (!validId(id)) issue(`${workbookOrderRoot}.${index}`, 'Expected a registered sheet ID')
+  })
+  let extraOrderEntries = 0
+  for (const [key, value] of layout) {
+    if (key !== 'order' || !Array.isArray(value)) {
+      issue(`${workbookLayoutRoot}.${key}`, 'Expected a sheet order array')
+      continue
+    }
+    extraOrderEntries += value.length
+    const seen = new Set<string>()
+    for (const [index, id] of value.entries()) {
+      if (!validId(id) || seen.has(id)) issue(`${workbookLayoutRoot}.order.${index}`, 'Expected a unique registered sheet ID')
+      else seen.add(id)
+    }
+  }
+  let entriesCount = entries.size + order.length + layout.size + extraOrderEntries
+  for (const name of [...document.share.keys()]) {
+    const root = colworkRoot(name)
+    if (!root) {
+      if (!limits.allowUnknownRoots) issue(name, 'Unknown document root')
+      continue
+    }
+    if (root.sheetId === undefined) continue
+    if (!ids.has(root.sheetId)) issue(name, 'Sheet has no workbook entry')
+    try {
+      entriesCount += root.type === 'array' ? document.getArray(name).length : document.getMap(name).size
+    } catch { issue(name, `Expected a ${root.type} root`) }
+  }
+  if (limits.maxEntries !== undefined && entriesCount > limits.maxEntries) issue('$', 'Workbook exceeds maxEntries')
+  for (const id of ids) {
+    const sheetIssues = validateSheetRoots(document, { ...limits, maxEntries: undefined, mergeConflicts: limits.mergeConflicts ?? 'resolve' }, id)
+    for (const { path, message } of sheetIssues) issue(`sheets.${id}.${path}`, message)
+  }
   return issues
 }

@@ -2,7 +2,8 @@ import * as Y from 'yjs'
 import { cellKey, containsPosition, type CellPosition, type CellRange } from './range'
 import { selectionRange } from './selection'
 import { getSheetMaps } from './model-validation'
-import { parseCellKey, parseMergeKey } from './model-schema'
+import { mergesIntersect, resolveMergeRanges } from './model-merges'
+import { parseCellKey } from './model-schema'
 import { SheetCoordinates, type ProjectedMap, type SheetAxis } from './sheetCoordinates'
 import { FormulaBook } from './formulas'
 import { MAIN_SHEET_ID } from './workbookModel'
@@ -187,15 +188,47 @@ export class SheetDocument {
     return `${range.start.row}:${range.start.column}-${range.end.row}:${range.end.column}`
   }
 
+  private getMergeCandidates() {
+    const coordinates = this.coordinates.hasRowOrder ? new SheetCoordinates(this.doc, this.sheetId) : this.coordinates
+    return [...this.merges.raw].flatMap(([id, value]) => {
+      const range = value === '1' && coordinates.mergeRange(id)
+      return range ? [{ id, range }] : []
+    })
+  }
+
   getMergeRanges() {
     if (this.mergeCache) return this.mergeCache
-    const ranges = Array.from(this.merges.keys()).flatMap(key => {
-      const range = parseMergeKey(key)
-      return range ? [range] : []
-    })
+    const resolved = resolveMergeRanges(this.getMergeCandidates().map(({ range }) => range))
+    const ranges = this.coordinates.hasRowOrder ? resolved.flatMap(({ start, end }) => {
+      const first = this.coordinates.visualRow(start.row)
+      const last = this.coordinates.visualRow(end.row)
+      return first === undefined || last === undefined ? []
+        : [{ start: { ...start, row: first }, end: { ...end, row: last } }]
+    }) : resolved
     // Reads inside a caller's open transaction must see its in-progress map writes.
     if (this.doc._transaction === null) this.mergeCache = ranges
     return ranges
+  }
+
+  removeMergesIntersecting(selection: CellRange) {
+    const rows = this.coordinates.hasRowOrder
+      ? Array.from({ length: selection.end.row - selection.start.row + 1 }, (_, offset) =>
+        this.coordinates.canonicalRow(selection.start.row + offset)).filter(row => row !== undefined).sort((a, b) => a - b)
+      : undefined
+    const intersects = (range: CellRange) => {
+      if (!rows) return mergesIntersect(selection, range)
+      if (range.start.column > selection.end.column || range.end.column < selection.start.column) return false
+      let start = 0, end = rows.length
+      while (start < end) {
+        const middle = start + Math.floor((end - start) / 2)
+        if (rows[middle] < range.start.row) start = middle + 1
+        else end = middle
+      }
+      return start < rows.length && rows[start] <= range.end.row
+    }
+    for (const { id, range } of this.getMergeCandidates()) {
+      if (intersects(range)) this.merges.raw.delete(id)
+    }
   }
 
   destroy() {
@@ -247,8 +280,8 @@ export class SheetDocument {
         }
         const sizes = axis === 'row' ? this.rowHeights : this.columnWidths
         for (let position = index; position < end; position++) sizes.delete(String(position))
-        for (const range of this.getMergeRanges()) {
-          if (range.start[axis] < end && range.end[axis] >= index) this.merges.delete(this.mergeKey(range))
+        for (const { id, range } of this.getMergeCandidates()) {
+          if (range.start[axis] < end && range.end[axis] >= index) this.merges.raw.delete(id)
         }
         this.coordinates.remove(axis, index, removeCount)
       } else {

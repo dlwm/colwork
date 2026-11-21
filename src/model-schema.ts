@@ -81,4 +81,13 @@ export type SheetValidationLimits = {
   maxMergeArea?: number
   maxMerges?: number
   allowUnknownRoots?: boolean
+  /** Strict single-sheet readers reject overlapping stored merges unless resolution is requested. */
+  mergeConflicts?: 'reject' | 'resolve'
+}
+
+
+/** Workbook limits supplied by the host. maxEntries applies across all known roots. */
+export type WorkbookValidationLimits = SheetValidationLimits & {
+  maxSheets?: number
+  maxRegisteredSheets?: number
 }

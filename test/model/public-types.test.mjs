@@ -5,10 +5,17 @@ import ts from 'typescript'
 
 const modelConsumer = `
 import * as Y from 'yjs'
-import { COLWORK_SCHEMA_VERSION, COLWORK_MAP_NAMES, getSheetMaps, readSheetSnapshot, type SheetSnapshot, type SheetValidationLimits } from '@kuzuma/colwork/model'
+import { COLWORK_SCHEMA_VERSION, COLWORK_MAP_NAMES, getSheetMaps, getSheetFeatureMaps, readSheetSnapshot, readWorkbookSnapshot, restoreWorkbookVersion, type WorkbookSnapshot, type SheetSnapshot, type SheetValidationLimits } from '@kuzuma/colwork/model'
 const doc = new Y.Doc()
 const limits: SheetValidationLimits = { maxMergeArea: 10000, maxMerges: 1000 }
 const snapshot: SheetSnapshot = readSheetSnapshot(doc, limits)
+const workbook: WorkbookSnapshot = readWorkbookSnapshot(doc, limits)
+getSheetFeatureMaps(doc).validation.set('0:0-0:0', '{"choices":["choice"]}')
+restoreWorkbookVersion(doc, Y.encodeStateAsUpdate(doc))
+// @ts-expect-error Workbook sheet names are strings.
+const invalidSheet: number = workbook.sheets[0].name
+// @ts-expect-error Feature map values are strings.
+getSheetFeatureMaps(doc).validation.set('0:0-0:0', 42)
 const version: 1 = COLWORK_SCHEMA_VERSION
 const root: 'cells' = COLWORK_MAP_NAMES.cells
 getSheetMaps(doc).cells.set('0:0', 'typed')

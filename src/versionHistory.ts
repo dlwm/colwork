@@ -1,4 +1,7 @@
 import type { YjsSnapshotFile } from './yjsArchive'
+import type { WorkbookSnapshot } from './model'
+import { compareWorkbookSnapshots } from './model-diff'
+import { renderVersionPreview } from './versionPreview'
 
 export type ColworkVersion = { id: string; createdAt: string; label?: string; author?: string }
 export type ColworkVersionPage = { versions: ColworkVersion[]; nextCursor?: string }
@@ -10,6 +13,8 @@ export type ColworkVersionHistory = {
   /** Include a client snapshot when the host persists it instead of taking a server-side snapshot. */
   captureClientSnapshot?: boolean
   list(input: ColworkVersionContext & { cursor?: string }): Promise<ColworkVersionPage>
+  /** Read the authorized version on demand for a preview or comparison. */
+  read?(input: ColworkVersionContext & { versionId: string }): Promise<WorkbookSnapshot>
   create?(input: ColworkVersionContext & { label?: string; snapshot?: YjsSnapshotFile }): Promise<ColworkVersion>
   restore?(input: ColworkVersionContext & { versionId: string }): Promise<void>
 }
@@ -18,7 +23,7 @@ export class VersionHistoryDialog {
   private dialog?: HTMLDialogElement
   private operation?: AbortController
   constructor(private readonly root: HTMLElement, private readonly adapter: ColworkVersionHistory,
-    private readonly canEdit: () => boolean, private readonly capture: () => YjsSnapshotFile | undefined) {}
+    private readonly canEdit: () => boolean, private readonly capture: () => YjsSnapshotFile | undefined, private readonly current: () => WorkbookSnapshot) {}
 
   close() {
     this.operation?.abort()
@@ -36,6 +41,17 @@ export class VersionHistoryDialog {
     const heading = doc.createElement('h3')
     heading.textContent = '版本历史'
     const list = doc.createElement('ol')
+    const baseline = doc.createElement('select')
+    baseline.setAttribute('aria-label', '对比基准')
+    const currentVersion = doc.createElement('option')
+    currentVersion.value = ''
+    currentVersion.textContent = '当前工作簿'
+    baseline.append(currentVersion)
+    const versions = new Map<string, string>()
+    const preview = doc.createElement('section')
+    preview.className = 'colwork-table__version-preview'
+    preview.setAttribute('aria-label', '版本差异')
+    baseline.onchange = () => preview.replaceChildren()
     const status = doc.createElement('p')
     status.setAttribute('role', 'status')
     const label = doc.createElement('input')
@@ -54,7 +70,7 @@ export class VersionHistoryDialog {
       if (this.operation || !dialog.open) return
       const operation = new AbortController()
       this.operation = operation
-      const controls = [...dialog.querySelectorAll('button')].filter(control => control !== close)
+      const controls = [...dialog.querySelectorAll<HTMLButtonElement | HTMLSelectElement>('button, select')].filter(control => control !== close)
       controls.forEach(control => { control.disabled = true })
       status.textContent = '正在处理…'
       try {
@@ -70,12 +86,42 @@ export class VersionHistoryDialog {
     const load = async (context: ColworkVersionContext, append = false) => {
       const page = await this.adapter.list({ ...context, cursor: append ? cursor : undefined })
       if (context.signal.aborted) return
-      if (!append) list.replaceChildren()
+      const previousBaseline = baseline.value
+      if (!append) {
+        list.replaceChildren()
+        preview.replaceChildren()
+        baseline.replaceChildren(currentVersion)
+        versions.clear()
+      }
       for (const version of page.versions) {
+        if (versions.has(version.id)) continue
         const item = doc.createElement('li')
         const date = new Date(version.createdAt)
         item.textContent = [version.label || '未命名版本',
           Number.isNaN(date.getTime()) ? version.createdAt : date.toLocaleString(), version.author].filter(Boolean).join(' · ')
+        versions.set(version.id, item.textContent)
+        if (this.adapter.read) {
+          const read = this.adapter.read.bind(this.adapter)
+          const option = doc.createElement('option')
+          option.value = version.id
+          option.textContent = item.textContent
+          baseline.append(option)
+          const previewButton = button('预览', () => {
+            const baseId = baseline.value
+            preview.replaceChildren()
+            void request(async context => {
+              const selected = read({ ...context, versionId: version.id })
+              const reference = baseId === version.id ? selected
+                : baseId ? read({ ...context, versionId: baseId }) : Promise.resolve().then(this.current)
+              const [before, after] = await Promise.all([reference, selected])
+              if (context.signal.aborted) return
+              renderVersionPreview(preview, compareWorkbookSnapshots(before, after),
+                versions.get(baseId) ?? '当前工作簿', versions.get(version.id)!)
+            })
+          })
+          previewButton.setAttribute('aria-label', `预览 ${version.label || '未命名版本'}`)
+          item.append(' ', previewButton)
+        }
         if (this.adapter.restore && this.canEdit()) {
           item.append(' ', button('恢复', () => {
             if (!this.canEdit() || !doc.defaultView?.confirm('恢复此版本会修改当前共享文档。确定继续？')) return
@@ -87,6 +133,7 @@ export class VersionHistoryDialog {
         }
         list.append(item)
       }
+      baseline.value = versions.has(previousBaseline) ? previousBaseline : ''
       cursor = page.nextCursor
       more.hidden = !cursor
     }
@@ -95,7 +142,13 @@ export class VersionHistoryDialog {
     const close = button('关闭', () => dialog.close())
     dialog.addEventListener('close', () => { if (this.dialog === dialog) this.close() }, { once: true })
     const refresh = button('刷新版本列表', () => { void request(context => load(context)) })
-    dialog.append(heading, refresh, list, status, more)
+    dialog.append(heading, refresh)
+    if (this.adapter.read) {
+      const baselineLabel = doc.createElement('label')
+      baselineLabel.append('对比基准', baseline)
+      dialog.append(baselineLabel)
+    }
+    dialog.append(list, status, more, preview)
     if (this.adapter.create && this.canEdit()) {
       dialog.append(label, button('保存版本', () => {
         if (!this.canEdit()) return

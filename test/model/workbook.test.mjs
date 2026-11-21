@@ -27,6 +27,25 @@ async function sample() {
   return arrayBuffer(await workbook.xlsx.writeBuffer())
 }
 
+test('XLSX checks the host limit against both existing and imported sheets', async () => {
+  const doc = new Y.Doc()
+  try {
+    const input = await sample()
+    await assert.rejects(importXlsx(doc, input, { maxSheets: 2 }), /最多允许 2 张/)
+    assert.deepEqual(listWorkbookSheets(doc).map(sheet => sheet.id), ['main'])
+    await importXlsx(doc, input, { maxSheets: 2, replaceBlankMain: true })
+    assert.equal(listWorkbookSheets(doc).length, 2)
+    const fallback = new Y.Doc()
+    try {
+      fallback.getMap('colwork-workbook').set('main', null)
+      getSheetMaps(fallback).cells.set('0:0', 'Fallback content')
+      await importXlsx(fallback, input)
+      assert.equal(listWorkbookSheets(fallback).length, 3)
+      assert.equal(readSheetSnapshot(fallback).cells['0:0'], 'Fallback content')
+    } finally { fallback.destroy() }
+  } finally { doc.destroy() }
+})
+
 test('XLSX round trip preserves sheet order, data, formulas, merges, and supported styles', async () => {
   const doc = new Y.Doc()
   try {

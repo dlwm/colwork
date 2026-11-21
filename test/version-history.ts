@@ -1,5 +1,5 @@
 import type * as Y from 'yjs'
-import { restoreWorkbookVersion, type ColworkVersion, type ColworkVersionHistory, type YjsSnapshotFile } from '../src/index'
+import { readWorkbookSnapshotUpdate, restoreWorkbookVersion, type ColworkVersion, type ColworkVersionHistory, type YjsSnapshotFile } from '../src/index'
 
 const retention = 12
 
@@ -22,6 +22,13 @@ export function demoVersionHistory(document: Y.Doc): ColworkVersionHistory {
   })()
   const all = (store: IDBObjectStore) => request<ColworkVersion[]>(store.getAll()).then(versions =>
     versions.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id)))
+  const load = async (id: string, signal: AbortSignal) => {
+    const db = await open()
+    const snapshot: YjsSnapshotFile | undefined = await request(db.transaction('snapshots').objectStore('snapshots').get(id))
+    signal.throwIfAborted()
+    if (!snapshot) throw new Error('版本不存在')
+    return Uint8Array.from(atob(snapshot.snapshot), character => character.charCodeAt(0))
+  }
   return {
     documentId: 'local-workbook-demo',
     captureClientSnapshot: true,
@@ -59,12 +66,11 @@ export function demoVersionHistory(document: Y.Doc): ColworkVersionHistory {
       await completed
       return version
     },
+    async read({ versionId, signal }) {
+      return readWorkbookSnapshotUpdate(await load(versionId, signal))
+    },
     async restore({ versionId, signal }) {
-      const db = await open()
-      const snapshot: YjsSnapshotFile | undefined = await request(db.transaction('snapshots').objectStore('snapshots').get(versionId))
-      signal.throwIfAborted()
-      if (!snapshot) throw new Error('版本不存在')
-      restoreWorkbookVersion(document, Uint8Array.from(atob(snapshot.snapshot), character => character.charCodeAt(0)))
+      restoreWorkbookVersion(document, await load(versionId, signal))
     },
   }
 }

@@ -8,7 +8,7 @@ import { SheetCoordinates } from './sheetCoordinates'
 import { encodeCellImage, imageLabel, readCellImage, type ColworkImageRef } from './cellImage'
 import { cellKey, type CellPosition, type CellRange } from './range'
 import { getSheetFeatureMaps, isConditionalFormat, isDataValidation, readFeature, type ColworkConditionalFormat, type ColworkDataValidation } from './sheetFeatures'
-import { listWorkbookSheets, MAIN_SHEET_ID, makeSheetId, normalizeSheetName, workbookOrderRoot, workbookRoot } from './workbookModel'
+import { checkSheetCapacity, listWorkbookSheets, MAIN_SHEET_ID, makeSheetId, normalizeSheetName, workbookOrderRoot, workbookRoot } from './workbookModel'
 
 const maxRows = 100000
 const maxColumns = 16384
@@ -23,6 +23,8 @@ const numberFormats = { general: 'General', number: '#,##0.########', date: 'yyy
 export type ColworkXlsxImage = { bytes: Uint8Array; mimeType: string }
 export type XlsxImportOptions = {
   replaceBlankMain?: boolean
+  /** Optional host limit for the resulting visible workbook, up to the converter's limit. */
+  maxSheets?: number
   canApply?: () => boolean
   uploadImage?: (image: ColworkXlsxImage & { name: string }) => Promise<ColworkImageRef>
 }
@@ -293,6 +295,18 @@ export async function importXlsx(document: Y.Doc, input: ArrayBuffer, options: X
   if (!workbook.worksheets.length || workbook.worksheets.length > maxSheets) throw new RangeError('Excel 工作表数量无效')
   const sheets = workbook.worksheets.map(readWorksheet)
   if (sheets.reduce((total, sheet) => total + sheet.cells.length, 0) > maxCells) throw new RangeError('Excel 最多导入十万个单元格')
+  const importTarget = () => {
+    const existing = listWorkbookSheets(document)
+    const mayReplaceBlank = options.replaceBlankMain && existing.length === 1 && existing[0].id === MAIN_SHEET_ID && existing[0].name === '工作表1'
+    const main = mayReplaceBlank ? readSheetSnapshot(document) : undefined
+    const replaceBlank = !!main && main.rowCount === 1 && main.columnCount === 1
+      && ![...Object.values(getSheetMaps(document)), ...Object.values(getSheetFeatureMaps(document))].some(map => map.size)
+    const count = sheets.length + existing.length - Number(replaceBlank)
+    checkSheetCapacity(count, options.maxSheets)
+    checkSheetCapacity(count, maxSheets)
+    return { existing, replaceBlank }
+  }
+  const target = importTarget()
   if (options.uploadImage) {
     const distinct = new Map<number, ColworkImageRef>()
     let anchors = 0
@@ -320,10 +334,7 @@ export async function importXlsx(document: Y.Doc, input: ArrayBuffer, options: X
     }
   }
   if (options.canApply && !options.canApply()) throw new Error('当前无法编辑工作簿，导入已取消')
-  const existing = listWorkbookSheets(document)
-  const mayReplaceBlank = options.replaceBlankMain && existing.length === 1 && existing[0].id === MAIN_SHEET_ID && existing[0].name === '工作表1'
-  const main = mayReplaceBlank ? readSheetSnapshot(document) : undefined
-  const replaceBlank = main && main.rowCount === 1 && main.columnCount === 1 && ![...Object.values(getSheetMaps(document)), ...Object.values(getSheetFeatureMaps(document))].some(map => map.size)
+  const { existing, replaceBlank } = options.uploadImage ? importTarget() : target
   const names = new Set((replaceBlank ? [] : existing).map(sheet => sheet.name.toLowerCase()))
   const imports = sheets.map((sheet, index) => {
     const base = sheet.name
@@ -337,7 +348,10 @@ export async function importXlsx(document: Y.Doc, input: ArrayBuffer, options: X
   })
   const aliases = new Map(imports.map(({ sheet, id }) => [sheet.name.toLowerCase(), id]))
   document.transact(() => {
-    const entries = document.getMap<string>(workbookRoot)
+    const entries = document.getMap<string | null>(workbookRoot)
+    if (!replaceBlank && existing.length === 1 && existing[0].id === MAIN_SHEET_ID && entries.get(MAIN_SHEET_ID) === null) {
+      entries.set(MAIN_SHEET_ID, existing[0].name)
+    }
     for (const { name, id } of imports) entries.set(id, name)
     document.getArray<string>(workbookOrderRoot).push(imports.map(sheet => sheet.id))
     const formulas = new FormulaBook(document)
@@ -397,7 +411,7 @@ export async function exportXlsx(document: Y.Doc, options: XlsxExportOptions = {
   const images = new Map<string, number | undefined>()
   // Snapshot the source before asynchronous asset retrieval can yield to collaboration updates.
   const sourceSheets = sheets.map(sheet => ({
-    ...sheet, snapshot: readSheetSnapshot(document, { maxRows, maxColumns, maxMerges, maxMergeArea }, sheet.id),
+    ...sheet, snapshot: readSheetSnapshot(document, { maxRows, maxColumns, maxMerges, maxMergeArea, mergeConflicts: 'resolve' }, sheet.id),
     coordinates: new SheetCoordinates(document, sheet.id), features: getSheetFeatureMaps(document, sheet.id),
   })).map(sheet => ({
     ...sheet, validation: [...sheet.features.validation].map(([key, value]) => [sheet.coordinates.mergeRange(key), value] as const),

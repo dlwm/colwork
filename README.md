@@ -134,6 +134,8 @@ const bytes = await exportXlsx(document)
 ## 编辑及分析
 
 - 方向键移动，Shift + 方向键扩选，Tab 横向移动，Enter 提交并下移。F2、空格与直接输入可进入编辑。选中单元格后可从公式栏查看和修改原始内容。
+- 编辑期间收到同一单元格的新内容时，提交草稿前会询问是否覆盖。切换工作表会保留各表的本地撤销与重做记录。
+- 通过快捷键在 Colwork 中复制公式时，相对引用随粘贴位置移动。粘贴能扩展工作表的可视范围，支持外部表格中的带引号多行单元格。目标包含锁定单元格、违反数据验证或超出筛选视图时，会提示并拒绝整批写入。
 - 从选区右下角拖动填充柄可复制格式和内容、延续等差数列，并移动公式的相对引用；公式中的绝对引用保持原位。填充范围需要为普通、可编辑的单元格。
 - Ctrl/⌘ + F 或工具栏「查找」可定位当前工作表视图中的内容。替换支持当前项和全部文本。
 - 「数据」菜单可配置下拉校验、包含／等于／大于／小于／空白高亮，以及以选区首行为标题的柱状图、折线图、行列分组透视汇总。分析设置随工作表同步，汇总可选择求和、计数和平均值。宿主可通过 `getSheetFeatureMaps(document, sheetId)` 获取规则和分析的 Yjs 根。
@@ -147,6 +149,8 @@ const versionHistory: ColworkVersionHistory = {
   documentId,
   list: ({ documentId, cursor, signal }) =>
     historyService.list(documentId, { cursor, signal }),
+  read: ({ documentId, versionId, signal }) =>
+    historyService.readSnapshot(documentId, versionId, { signal }), // Promise<WorkbookSnapshot>
   create: ({ documentId, label, signal }) =>
     historyService.saveCurrent(documentId, { label, signal }),
   restore: ({ documentId, versionId, signal }) =>
@@ -162,8 +166,9 @@ const workbook = new ColworkWorkbook(container, {
 ```
 
 - `list` 只返回当前页的版本元数据和可选的 `nextCursor`，并可单独注册为只读历史。宿主负责鉴权、版本留存和提交的原子性。关闭面板会中止前端等待，请用 `signal` 取消可取消的网络请求。
+- 可选的 `read` 按需返回已授权的 `WorkbookSnapshot`。注册后可预览历史版本与当前工作簿或另一个已列出的版本之间的差异，涵盖工作表、单元格和规则。只读用户也可预览宿主授权的版本。宿主如果存储完整的 Yjs 更新，可用 `readWorkbookSnapshotUpdate(bytes)` 转换。
 - 保存前 Colwork 会提交当前编辑。建议宿主等待协作更新落库，再从服务端捕获版本。若宿主需要保存客户端快照，可设 `captureClientSnapshot: true`，此时允许导出的实例会向 `create` 提供一个 `snapshot`。宿主可自行决定快照或增量的存储策略。
-- 恢复由宿主应用到当前共享文档，并通过已有协作连接同步给参与者。`restoreWorkbookVersion(liveDoc, versionBytes)` 可在 Node 端把保存的完整 Yjs 状态恢复为一次可同步的事务，保留宿主自定义的 Yjs 根。宿主按业务需要在恢复前保留当前版本或检查服务端版本号。
+- `restoreWorkbookVersion(liveDoc, versionBytes)` 在给定 Yjs 文档中恢复 Colwork 数据，保留宿主自定义的 Yjs 根。宿主在提交恢复时负责检查当前版本和写权限，并决定是否先归档当前内容。需要让恢复成为新的编辑起点时，宿主需让客户端切换到新的协作会话，按业务规则拒绝或另存旧会话积压的更新。继续在原会话中同步时，迟到的旧更新仍会按 Yjs 规则合并。宿主也可在副本上准备并校验恢复结果，再提交服务端状态。
 - 默认注册版本历史后会关闭旧的浏览器会话更新日志，仍可通过 `recordUpdateLog: true` 显式开启。库沿用构造参数注册回调及已有的 `onEditingChange`，React 和 Vue 共用同一个接口。独立的工作簿演示以浏览器 IndexedDB 实现宿主存储，保留最近 12 个版本。
 
 ## 单元格图片
@@ -298,6 +303,32 @@ const archive = exportYjsSnapshot(document, { room: 'optional-label', sequence: 
 
 增删行列使用可选的 `colwork-row-edits`、`colwork-column-edits` 协作序列。原有单元格保留稳定标识，插入行列使用新标识，删除记录让相应标识从视图中消失。并发写入已删除行列的值不会显示，撤销删除可恢复该行列。原始 Yjs 快照可能包含已删除行列的并发写入，`readSheetSnapshot()` 只返回可见数据。旧快照直接载入，发生增删行列后，协作各方应使用支持该序列的版本。宿主直接写入 `getSheetMaps().cells` 前可用 `getSheetCellStorageKey(doc, '0:0')` 将显示坐标转换为存储键。
 
+### 工作簿校验、快照和对比
+
+服务端可通过 `@kuzuma/colwork/model` 使用整本工作簿的公共接口。
+
+```ts
+import { compareWorkbookSnapshots, readWorkbookSnapshot, readWorkbookSnapshotUpdate, validateWorkbook } from '@kuzuma/colwork/model'
+
+const limits = { maxSheets: 32, maxEntries: 100000, maxMerges: 1000 }
+const issues = validateWorkbook(document, limits)
+const current = readWorkbookSnapshot(document, limits)
+const previous = readWorkbookSnapshotUpdate(versionBytes, limits)
+const changes = compareWorkbookSnapshots(previous, current, { maxExamples: 100 })
+```
+
+- `validateWorkbook()` 校验工作簿元数据、已登记工作表及已删除工作表的保留数据。`maxSheets` 限制可见工作表数，`maxRegisteredSheets` 限制登记总数（包括已删除的工作表），`maxEntries` 限制整本工作簿的总条目数。宿主可将同一个 `maxSheets` 传给 `ColworkWorkbook`、`addWorkbookSheet` 和 `importXlsx`，提前在操作处提示，并在服务端写入前统一校验。XLSX 转换器上限为 32 张可见工作表。设置 `allowUnknownRoots: true` 可保留宿主自定义根。
+- `readWorkbookSnapshot()` 按共享顺序返回可见工作表。每张表包含原有 `SheetSnapshot`、数据验证、条件格式与分析定义。规则及分析相关坐标投影到共享行列。宿主可用返回值计算内容摘要，并用完整 Yjs 更新保存可协作的版本。
+- `compareWorkbookSnapshots()` 统计全部差异，`maxExamples` 限制各表合计返回的单元格和规则示例。格式、保护、合并及尺寸的变化按类别报告。结构变化后按共享坐标比较单元格。
+- 工作表重排把整份顺序写入 `colwork-workbook-layout` 的单个值。并发重排由 Yjs 选定一份顺序，并保留并发新增的工作表。读取接口也会处理旧版顺序中的重复 ID。
+- 相交的并发合并按共享坐标选出可见区域，优先保留左上角靠前的区域。起点相同时依次比较结束行、结束列并优先保留较大的坐标。原始更新保留合并记录，单元格内容仍可在拆分后查看。整本工作簿的接口默认采用这套规则，`mergeConflicts: 'reject'` 可用于严格拒绝相交几何。既有单表接口默认保持严格校验，需要处理相交合并时可传 `mergeConflicts: 'resolve'`。
+
+### 从 0.4 升级
+
+1. 先升级协作后端。使用 `validateWorkbook()` 校验整本工作簿，将业务限额传入校验。维护自定义根白名单的项目需接受 `colwork-workbook-layout`。已保存内容摘要的项目应验证旧快照能继续通过原有摘要校验。
+2. 再升级同一房间的客户端。已有快照可直接读取，仍使用 0.4 的客户端只会显示旧顺序。用旧文档测试打开、拖动标签、持久化和重新打开。
+3. 需要版本预览时，为已有的 `versionHistory` 注册 `read` 回调，返回当前用户获准读取的 `WorkbookSnapshot`。版本存储、恢复操作和旧会话处理沿用宿主的接口。
+
 ## 开发
 
 ```sh
@@ -321,7 +352,7 @@ npm run dev -- --source=local
 npm run dev -- --source=npm
 ```
 
-npm 模式自动从官方 registry 安装 `@kuzuma/colwork@0.4.0` 到被 Git 忽略的 `.wrangler/npm-demo/`，不会修改项目依赖或锁文件；本地模式保留源码热更新。若要测试其他已发布版本，设置 `COLWORK_NPM_VERSION`：
+npm 模式自动从官方 registry 安装 `@kuzuma/colwork@0.5.0` 到被 Git 忽略的 `.wrangler/npm-demo/`，不会修改项目依赖或锁文件；本地模式保留源码热更新。若要测试其他已发布版本，设置 `COLWORK_NPM_VERSION`：
 
 ```sh
 COLWORK_NPM_VERSION=latest npm run dev -- --source=npm

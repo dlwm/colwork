@@ -1,14 +1,17 @@
 import * as Y from 'yjs'
-import { COLWORK_SCHEMA_VERSION, COLWORK_MAP_NAMES, parseCellKey, parseMergeKey, type CellLock, type CellStyle, type SheetSnapshot, type SheetValidationLimits } from './model-schema'
-import { getSheetMaps, validateSheetDocument } from './model-validation'
+import { COLWORK_SCHEMA_VERSION, COLWORK_MAP_NAMES, parseCellKey, parseMergeKey, type CellLock, type CellStyle, type SheetSnapshot, type SheetValidationLimits, type WorkbookValidationLimits } from './model-schema'
+import { getSheetMaps, validateSheetDocument, validateWorkbook } from './model-validation'
 import { bytesToBase64, type YjsSnapshotFile } from './yjsArchive'
 import { SheetCoordinates } from './sheetCoordinates'
 import { FormulaBook } from './formulas'
-import { getSheetFeatureMaps } from './sheetFeatures'
+import { getSheetFeatureMaps, isAnalysis, isConditionalFormat, isDataValidation, readFeature, type ColworkAnalysis, type ColworkConditionalFormat, type ColworkDataValidation } from './sheetFeatures'
+import { listWorkbookSheets } from './workbookModel'
+import { compareMergeRanges, resolveMergeRanges } from './model-merges'
+import type { CellRange } from './range'
 export * from './model-schema'
 export { getSheetFeatureMaps, type ColworkAnalysis, type ColworkConditionalFormat, type ColworkDataValidation } from './sheetFeatures'
 export type { CellPosition, CellRange } from './range'
-export { getSheetMaps, validateSheetDocument } from './model-validation'
+export { getSheetMaps, validateSheetDocument, validateWorkbook } from './model-validation'
 export { rebuildYjsSnapshot } from './yjsRebuild'
 export { listWorkbookSheets, addWorkbookSheet, removeWorkbookSheet, moveWorkbookSheet, setWorkbookSheetName, MAIN_SHEET_ID, type WorkbookSheet } from './workbookModel'
 export type { YjsArchiveFile, YjsSnapshotFile, YjsUpdateLogFile, YjsUpdateRecord } from './yjsArchive'
@@ -41,6 +44,10 @@ function canonicalStyle(style: CellStyle): CellStyle {
 export function readSheetSnapshot(document: Y.Doc, limits?: SheetValidationLimits, sheetId?: string): SheetSnapshot {
   const issues = validateSheetDocument(document, limits, sheetId)
   if (issues.length) throw new TypeError(`Invalid Colwork document at ${issues[0].path}: ${issues[0].message}`)
+  return snapshotSheet(document, sheetId, limits?.mergeConflicts === 'resolve')
+}
+
+function snapshotSheet(document: Y.Doc, sheetId?: string, resolveConflicts = false): SheetSnapshot {
   const coordinates = new SheetCoordinates(document, sheetId)
   const maps = coordinates.project(getSheetMaps(document, sheetId))
   const styles = Object.fromEntries(orderedEntries(maps.styles).map(([key, value]) => [key, canonicalStyle(JSON.parse(value))]))
@@ -49,7 +56,8 @@ export function readSheetSnapshot(document: Y.Doc, limits?: SheetValidationLimit
     const lock = JSON.parse(value)
     return [key, { version: lock.version, algorithm: lock.algorithm, iterations: lock.iterations, salt: lock.salt, verifier: lock.verifier }]
   }))
-  const merges = [...maps.merges.keys()].map(key => parseMergeKey(key)!).sort((a, b) => a.start.row - b.start.row || a.start.column - b.start.column || a.end.row - b.end.row || a.end.column - b.end.column)
+  const candidates = [...maps.merges.keys()].map(key => parseMergeKey(key)!)
+  const merges = resolveConflicts ? resolveMergeRanges(candidates) : candidates.sort(compareMergeRanges)
   let rowCount = coordinates.extent('row')
   let columnCount = coordinates.extent('column')
   for (const key of [...maps.cells.keys(), ...maps.styles.keys(), ...maps.locks.keys()]) {
@@ -67,6 +75,67 @@ export function readSheetSnapshot(document: Y.Doc, limits?: SheetValidationLimit
   return { schemaVersion: COLWORK_SCHEMA_VERSION, rowCount, columnCount,
     cells: Object.fromEntries(orderedEntries(maps.cells).map(([key, value]) => [key, formulas.source(value)])), styles,
     rowHeights: Object.fromEntries(orderedEntries(maps.rowHeights)), columnWidths: Object.fromEntries(orderedEntries(maps.columnWidths)), merges, locks }
+}
+
+export type WorkbookSheetFeatures = {
+  validation: Array<{ range: CellRange; rule: ColworkDataValidation }>
+  conditional: Array<{ range: CellRange; rule: ColworkConditionalFormat }>
+  analyses: Array<Omit<ColworkAnalysis, 'range' | 'group' | 'value' | 'column'> & {
+    id: string
+    range: CellRange | null
+    group: number | null
+    value: number | null
+    column?: number | null
+  }>
+}
+
+export type WorkbookSnapshot = {
+  schemaVersion: typeof COLWORK_SCHEMA_VERSION
+  sheets: Array<{ id: string; name: string; snapshot: SheetSnapshot; features: WorkbookSheetFeatures }>
+}
+
+function snapshotFeatures(document: Y.Doc, id: string): WorkbookSheetFeatures {
+  const coordinates = new SheetCoordinates(document, id)
+  const maps = getSheetFeatureMaps(document, id)
+  // Preserve the rule precedence used by the editor, in canonical sheet coordinates.
+  const rules = <T>(map: Y.Map<string>, check: (value: unknown) => value is T) =>
+    [...map].sort(([left], [right]) => right.localeCompare(left)).flatMap(([key, raw]) => {
+      const range = coordinates.mergeRange(key)
+      const rule = readFeature(raw, check)
+      return range && rule ? [{ range, rule }] : []
+    })
+  const conditional = rules(maps.conditional, isConditionalFormat).map(({ range, rule }) => ({
+    range, rule: { operator: rule.operator, value: rule.value, background: rule.background },
+  }))
+  const validation = rules(maps.validation, isDataValidation).map(({ range, rule }) => ({ range, rule: { choices: rule.choices } }))
+  const analyses = [...maps.analyses].sort(([a], [b]) => a.localeCompare(b)).map(([id, raw]) => {
+    const rule = readFeature(raw, isAnalysis)!
+    return {
+      id, name: rule.name, kind: rule.kind, range: coordinates.mergeRange(rule.range) ?? null,
+      group: coordinates.axisPosition('column', rule.group) ?? null,
+      value: coordinates.axisPosition('column', rule.value) ?? null,
+      ...(rule.column === undefined ? {} : { column: coordinates.axisPosition('column', rule.column) ?? null }),
+      summarize: rule.summarize,
+    }
+  })
+  return { validation, conditional, analyses }
+}
+
+/** Reads the entire visible workbook in shared order, including rules and analysis definitions. */
+export function readWorkbookSnapshot(document: Y.Doc, limits?: WorkbookValidationLimits): WorkbookSnapshot {
+  const [issue] = validateWorkbook(document, limits)
+  if (issue) throw new TypeError(`Invalid Colwork workbook at ${issue.path}: ${issue.message}`)
+  const sheets = listWorkbookSheets(document).map(({ id, name }) => ({
+    id, name, snapshot: snapshotSheet(document, id, limits?.mergeConflicts !== 'reject'), features: snapshotFeatures(document, id),
+  }))
+  return { schemaVersion: COLWORK_SCHEMA_VERSION, sheets }
+}
+
+/** Decodes a complete Yjs update, reads its workbook and then releases temporary state. */
+export function readWorkbookSnapshotUpdate(update: Uint8Array, limits?: WorkbookValidationLimits): WorkbookSnapshot {
+  const document = new Y.Doc()
+  try { Y.applyUpdate(document, update); return readWorkbookSnapshot(document, limits) }
+  finally { document.destroy() }
 }
 
 /** Initializes an empty document without demo cells, headers, styles, or network access. */
@@ -96,3 +165,4 @@ export function readSheetSnapshotUpdate(update: Uint8Array, limits?: SheetValida
   finally { document.destroy() }
 }
 export { restoreWorkbookVersion } from './restoreVersion'
+export { compareWorkbookSnapshots, type WorkbookCellChange, type WorkbookRuleChange, type WorkbookSheetChange } from './model-diff'

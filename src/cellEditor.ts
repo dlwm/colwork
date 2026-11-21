@@ -1,6 +1,5 @@
 import type { CellPosition } from './range'
 import type { EditingState } from './options'
-import { normalizeCellText } from './unicode'
 
 type EditorHost = {
   table: HTMLTableElement
@@ -8,7 +7,8 @@ type EditorHost = {
   position(id: string): string | undefined
   canEdit(key: string): boolean
   read(key: string): string | undefined
-  write(key: string, value: string): void
+  readRaw(id: string): string | undefined
+  write(key: string, value: string, previous: string | undefined): void
   applyStyle(element: HTMLElement, key: string): void
   renderContent(element: HTMLElement, key: string): void
   announce(cursor: CellPosition & { offset?: number }): void
@@ -25,6 +25,7 @@ export class CellEditor {
   private id?: string
   get key() { return this.id === undefined ? undefined : this.host.position(this.id) }
   private original = ''
+  private originalRaw?: string
   constructor(private readonly host: EditorHost) {}
 
   start(cell: HTMLTableCellElement, key: string, announce = true, initial?: string) {
@@ -34,6 +35,7 @@ export class CellEditor {
     this.id = this.host.id(key)
     if (this.id === undefined) return
     this.original = this.host.read(key) ?? ''
+    this.originalRaw = this.host.readRaw(this.id)
     const input = document.createElement('textarea')
     input.className = 'colwork-table__editor'
     input.value = initial ?? this.original
@@ -43,7 +45,7 @@ export class CellEditor {
     cell.append(input)
     if (announce) this.host.announce({ ...(this.host.focus() ?? { row: 0, column: 0 }), offset: 0 })
     input.addEventListener('input', () => this.host.changed({ editing: true, dirty: input.value !== this.original }))
-    this.host.changed({ editing: true, dirty: false })
+    this.host.changed({ editing: true, dirty: input.value !== this.original })
     input.addEventListener('blur', () => this.finish(true), { once: true })
     input.addEventListener('keydown', event => {
       if (event.isComposing) return
@@ -55,7 +57,7 @@ export class CellEditor {
       }
       if (event.key === 'Escape') { event.stopPropagation(); this.finish(false) }
     })
-    input.focus()
+    input.focus({ preventScroll: true })
     if (initial === undefined) input.select()
     else input.setSelectionRange(input.value.length, input.value.length)
   }
@@ -67,10 +69,11 @@ export class CellEditor {
     // Clear state before removing a focused textarea, which synchronously fires blur.
     this.input = undefined
     this.id = undefined
-    if (key && commit && this.host.canEdit(key) && input.value !== this.original && input.value !== this.host.read(key)) {
-      this.host.write(key, normalizeCellText(input.value))
+    if (key && commit && this.host.canEdit(key) && input.value !== this.original) {
+      this.host.write(key, input.value, this.originalRaw)
     }
     this.original = ''
+    this.originalRaw = undefined
     this.host.clearEditingPresence()
     input.remove()
     const cell = key && this.host.table.querySelector<HTMLTableCellElement>(`td[data-key="${key}"]`)
