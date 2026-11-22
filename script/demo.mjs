@@ -26,7 +26,7 @@ async function run(executable, parameters) {
 }
 
 if (source === 'npm') {
-  const version = process.env.COLWORK_NPM_VERSION ?? '0.6.0'
+  const version = process.env.COLWORK_NPM_VERSION ?? '1.0.0'
   console.log(`Colwork demo source: @kuzuma/colwork@${version}`)
   await run('npm', ['install', '--prefix', npmDemoRoot, '--no-save', '--package-lock=false', '--ignore-scripts', '--registry=https://registry.npmjs.org', `@kuzuma/colwork@${version}`])
 } else console.log('Colwork demo source: local src/')

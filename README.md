@@ -334,11 +334,13 @@ const changes = compareWorkbookSnapshots(previous, current, { maxExamples: 100 }
 2. 再升级同一房间的客户端。已有快照可直接读取，仍使用 0.4 的客户端只会显示旧顺序。用旧文档测试打开、拖动标签、持久化和重新打开。
 3. 需要版本预览时，为已有的 `versionHistory` 注册 `read` 回调，返回当前用户获准读取的 `WorkbookSnapshot`。版本存储、恢复操作和旧会话处理沿用宿主的接口。
 
-### 从 0.5 升级
+### 升级到 1.0
 
 ```sh
-npm install --save-exact @kuzuma/colwork@0.6.0
+npm install --save-exact @kuzuma/colwork@1.0.0
 ```
+
+1.0.0 将 0.6.0 的功能和公开接口定为稳定版。已接入 0.6.0 的项目可直接更新依赖。由 0.5 升级的项目可按以下步骤接入保存回执和 XLSX 差异提示。
 
 1. 更新使用 Colwork 的前端、协作服务及锁文件。使用仓库自带的 Cloudflare 部署时，先更新 `colwork-backend`，再更新 `colwork-frontend`。现有工作簿和版本快照沿用原格式。
 2. 如需显示保存状态，使用 `trackColworkWorkerSave(provider)` 连接配有 `createColworkWebSocket()` 的 Worker，或为自管协作服务使用 `ColworkSaveTracker`。订阅状态，在宿主选定的时机调用 `confirmSaved()`。调用前可用 `commitEditing()` 提交当前单元格输入。页面卸载时释放跟踪器。
@@ -368,7 +370,7 @@ npm run dev -- --source=local
 npm run dev -- --source=npm
 ```
 
-npm 模式自动从官方 registry 安装 `@kuzuma/colwork@0.6.0` 到被 Git 忽略的 `.wrangler/npm-demo/`，不会修改项目依赖或锁文件；本地模式保留源码热更新。若要测试其他已发布版本，设置 `COLWORK_NPM_VERSION`：
+npm 模式自动从官方 registry 安装 `@kuzuma/colwork@1.0.0` 到被 Git 忽略的 `.wrangler/npm-demo/`，不会修改项目依赖或锁文件；本地模式保留源码热更新。若要测试其他已发布版本，设置 `COLWORK_NPM_VERSION`：
 
 ```sh
 COLWORK_NPM_VERSION=latest npm run dev -- --source=npm
