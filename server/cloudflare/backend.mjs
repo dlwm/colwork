@@ -86,11 +86,14 @@ export class ColworkRoom extends DurableObject {
     else socket.send(message)
   }
 
-  receive(socket, message) {
+  async receive(socket, message) {
     const frame = new Uint8Array(message)
     let entry = this.chunkReaders.get(socket)
     if (!entry && readSocketReceipt(frame) !== undefined && socket.deserializeAttachment()?.chunked) {
-      socket.send(frame)
+      if (!socket.deserializeAttachment()?.canWrite) { socket.close(1008, 'Write access required for save receipt'); return }
+      if (this.doc.store.pendingStructs || this.doc.store.pendingDs) throw new Error('Unresolved collaboration updates')
+      await this.ctx.storage.sync()
+      if (socket.readyState === WebSocket.OPEN && !this.closeExpired(socket)) socket.send(frame)
       return
     }
     if (!entry && !isSocketChunk(frame)) {
@@ -185,7 +188,7 @@ export class ColworkRoom extends DurableObject {
     const current = previous.then(async () => {
       const delay = socket.deserializeAttachment()?.delay ?? 0
       if (delay) await new Promise(resolve => setTimeout(resolve, delay))
-      if (socket.readyState === WebSocket.OPEN && !this.closeExpired(socket)) this.receive(socket, message)
+      if (socket.readyState === WebSocket.OPEN && !this.closeExpired(socket)) await this.receive(socket, message)
     }).catch(() => {
       this.chunkReaders.delete(socket)
       socket.close(1003, 'Invalid collaboration message')

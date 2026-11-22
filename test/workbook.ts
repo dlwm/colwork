@@ -1,8 +1,8 @@
 import * as Y from 'yjs'
 import { Awareness } from 'y-protocols/awareness'
 import { WebsocketProvider } from 'y-websocket'
-import { ColworkWorkbook, createColworkWebSocket, waitForColworkSync, getSheetMaps, setWorkbookSheetName } from '../src/index'
-import { downloadXlsx, importWorkbookFile } from './workbook-files'
+import { ColworkWorkbook, createColworkWebSocket, getSheetMaps, setWorkbookSheetName, trackColworkWorkerSave } from '../src/index'
+import { downloadXlsx, importWorkbookFile, workbookImportOrigin } from './workbook-files'
 import { FormulaBook } from '../src/formulas'
 import { cloudflareDeployment } from './user-settings'
 import { demoVersionHistory } from './version-history'
@@ -14,6 +14,8 @@ const awareness = new Awareness(documentModel)
 const input = document.querySelector<HTMLInputElement>('#import')!
 const download = document.querySelector<HTMLButtonElement>('#download')!
 const status = document.querySelector<HTMLElement>('#status')!
+const confirmSave = document.querySelector<HTMLButtonElement>('#confirm-save')!
+const saveStatus = document.querySelector<HTMLElement>('#save-status')!
 const room = new URLSearchParams(location.search).get('room')
 const websocketUrl = cloudflareDeployment
   ? `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/rooms`
@@ -21,6 +23,11 @@ const websocketUrl = cloudflareDeployment
 const provider = room && /^[A-Za-z0-9_-]{1,64}$/.test(room)
   ? new WebsocketProvider(websocketUrl, `workbook-${room}`, documentModel, { awareness, connect: false, disableBc: true, WebSocketPolyfill: cloudflareDeployment ? createColworkWebSocket() : undefined })
   : undefined
+const saveTracker = provider && cloudflareDeployment ? trackColworkWorkerSave(provider, {
+  isLocalUpdate: transaction => transaction.local || transaction.origin === workbookImportOrigin,
+}) : undefined
+let dirtyInput = false
+let busy = false
 
 function seed() {
   const metadata = documentModel.getMap('colwork-metadata')
@@ -43,12 +50,28 @@ function seed() {
 if (!provider) seed()
 const workbook = new ColworkWorkbook(document.querySelector('#table')!, {
   recordUpdateLog: false, collaboration: { document: documentModel, awareness }, user: '示例查看者', personalViewKey: `workbook-demo:${room ?? 'local'}`, readOnly: !!provider, images: demoImages, versionHistory: provider ? undefined : demoVersionHistory(documentModel),
+  onEditingChange: ({ dirty }) => { dirtyInput = dirty; updateSaveStatus() },
 })
-let busy = false
+function updateSaveStatus() {
+  if (!provider) return
+  saveStatus.hidden = false
+  const state = saveTracker?.getState()
+  const connection = provider.synced ? '初始同步完成' : provider.wsconnected ? '已连接，正在初始同步'
+    : provider.wsconnecting ? '正在连接' : '协作连接已断开'
+  const labels = { unknown: '尚未确认落库', pending: '有未确认落库的改动', saving: '正在确认落库', saved: '已确认落库', error: '落库确认失败' }
+  const persistence = dirtyInput ? '有未提交的单元格输入' : state ? labels[state.persistence] : '当前服务不提供落库回执'
+  saveStatus.textContent = `${connection} · ${persistence}`
+  saveStatus.title = state?.error instanceof Error ? state.error.message : ''
+  confirmSave.hidden = !saveTracker
+  confirmSave.disabled = busy || !state?.synced || state.persistence === 'saving'
+}
+
 function updateControls() {
   input.disabled = download.disabled = busy || (provider !== undefined && !provider.synced)
+  updateSaveStatus()
 }
 if (provider) {
+  provider.on('status', updateSaveStatus)
   provider.on('sync', (synced: boolean) => {
     if (synced) seed()
     workbook.setReadOnly(!synced)
@@ -57,6 +80,11 @@ if (provider) {
   })
   status.textContent = '正在连接共享工作簿'
   provider.connect()
+}
+saveTracker?.subscribe(updateSaveStatus)
+confirmSave.onclick = () => {
+  workbook.commitEditing()
+  void saveTracker?.confirmSaved().catch(() => { /* The save status displays the error. */ })
 }
 updateControls()
 
@@ -75,7 +103,7 @@ input.onchange = () => {
   void run(async () => {
     workbook.commitEditing()
     const [sheet] = await importWorkbookFile(documentModel, file, provider ? () => provider.synced : undefined, cloudflareDeployment, demoImages,
-      provider && cloudflareDeployment ? () => waitForColworkSync(provider.ws!) : undefined)
+      saveTracker ? async () => { await saveTracker.confirmSaved() } : undefined)
     workbook.setActiveSheet(sheet)
   })
 }

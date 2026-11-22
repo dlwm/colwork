@@ -127,12 +127,16 @@
 .colwork-table__formula-bar button[hidden] { display: none; }
 .colwork-table__feature-dialog label { display: inline-flex; flex-direction: column; margin: 4px; vertical-align: top; }
 .colwork-table__feature-dialog select, .colwork-table__feature-dialog textarea { margin: 3px; }
+.colwork-table__paste-dialog { box-sizing: border-box; width: min(340px, calc(100vw - 32px)); }
+.colwork-table__paste-dialog textarea { box-sizing: border-box; display: block; width: 100%; margin: 8px 0; font: inherit; resize: vertical; }
 .colwork-table__analysis-result { max-height: 45vh; overflow: auto; }
 .colwork-table__analysis-result canvas { display: block; max-width: 100%; height: auto; }
 .colwork-table__analysis-result table { border-collapse: collapse; }
 .colwork-table__analysis-result :is(th, td) { padding: 4px 8px; border: 1px solid #dbe3ed; text-align: left; }
 
 
+.colwork-table__version-dialog { box-sizing: border-box; overflow: hidden; padding: 0; }
+.colwork-table__version-dialog-content { box-sizing: border-box; max-height: calc(80vh - 2px); overflow: auto; padding: 18px; }
 .colwork-table__version-preview:empty { display: none; }
 .colwork-table__version-preview { min-width: 0; overflow-x: auto; }
 .colwork-table__version-preview details { margin: 8px 0; }

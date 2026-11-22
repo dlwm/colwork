@@ -1,13 +1,13 @@
 import type { ColworkViewPolicy } from './options'
 
 const hostClass = 'colwork-table__watermark'
-const hostCss = `
+type WatermarkPlacement = 'table' | 'overlay'
+const hostCss = (placement: WatermarkPlacement) => `
   :host {
     all: initial !important;
     display: block !important;
-    position: relative !important;
-    grid-area: 3 / 1 !important;
-    place-self: stretch !important;
+    ${placement === 'table' ? 'position: relative !important; grid-area: 3 / 1 !important; place-self: stretch !important;'
+      : 'position: absolute !important; inset: 0 !important;'}
     min-width: 0 !important;
     min-height: 0 !important;
     contain: strict !important;
@@ -67,7 +67,7 @@ export class TableWatermark {
   #viewerText = ''
   #fixedText = ''
 
-  constructor(private readonly shell: HTMLElement) {}
+  constructor(private readonly shell: HTMLElement, private readonly placement: WatermarkPlacement = 'table') {}
 
   setText(watermark: ColworkViewPolicy['watermark']) {
     const viewerText = normalizeLine(watermark?.viewerText)
@@ -82,9 +82,10 @@ export class TableWatermark {
     const doc = this.shell.ownerDocument
     const overlay = doc.createElement('div')
     const shadow = overlay.attachShadow({ mode: 'closed' })
+    const css = hostCss(this.placement)
     const Sheet = doc.defaultView?.CSSStyleSheet
     const sheet = Sheet && 'replaceSync' in Sheet.prototype && 'adoptedStyleSheets' in shadow ? new Sheet() : undefined
-    sheet?.replaceSync(hostCss)
+    sheet?.replaceSync(css)
 
     const restoreDrawing = () => {
       shadow.replaceChildren(makePattern(doc, lines))
@@ -92,7 +93,7 @@ export class TableWatermark {
         shadow.adoptedStyleSheets = [sheet]
       } else {
         const style = doc.createElement('style')
-        style.textContent = hostCss
+        style.textContent = css
         shadow.prepend(style)
       }
     }

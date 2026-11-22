@@ -16,7 +16,11 @@ function previewText(value: string | undefined) {
   return value.length <= 160 ? value : value.slice(0, 160) + '…'
 }
 
-export function renderVersionPreview(output: HTMLElement, changes: WorkbookSheetChange[], baseline: string, target: string) {
+export function removeVersionPreviewValues(output: HTMLElement) {
+  output.querySelectorAll('[data-colwork-version-value]').forEach(cell => cell.remove())
+}
+
+export function renderVersionPreview(output: HTMLElement, changes: WorkbookSheetChange[], baseline: string, target: string, showValues: boolean) {
   const doc = output.ownerDocument
   const element = <K extends keyof HTMLElementTagNameMap>(tag: K, text?: string) => {
     const result = doc.createElement(tag)
@@ -53,11 +57,27 @@ export function renderVersionPreview(output: HTMLElement, changes: WorkbookSheet
     if (change.cells.examples.length) {
       const table = element('table')
       const header = table.createTHead().insertRow()
-      for (const label of ['单元格', '基准版本', '所选版本']) header.append(element('th', label))
+      header.append(element('th', '单元格'))
+      if (showValues) {
+        for (const label of ['基准版本', '所选版本']) {
+          const heading = element('th', label)
+          heading.setAttribute('data-colwork-version-value', '')
+          header.append(heading)
+        }
+      }
       const body = table.createTBody()
       for (const cell of change.cells.examples) {
         const row = body.insertRow()
-        row.append(element('th', address(cell.key)), element('td', previewText(cell.before)), element('td', previewText(cell.after)))
+        const coordinate = element('th', address(cell.key))
+        coordinate.scope = 'row'
+        row.append(coordinate)
+        if (showValues) {
+          for (const value of [cell.before, cell.after]) {
+            const valueCell = element('td', previewText(value))
+            valueCell.setAttribute('data-colwork-version-value', '')
+            row.append(valueCell)
+          }
+        }
       }
       details.append(table)
     }

@@ -142,6 +142,7 @@ export class PointerInteraction {
     this.host.menu.show(x, y, [
       { label: '编辑', actions: [
         ['复制', () => this.host.clipboard.copySelection()],
+        ['选择性粘贴', () => this.host.clipboard.openPasteOptions()],
         ['清空内容', () => this.host.clearSelectionContents()],
       ] },
       { label: '单元格', actions: [

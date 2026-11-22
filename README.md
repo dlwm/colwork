@@ -130,12 +130,15 @@ const bytes = await exportXlsx(document)
 - **个人排序筛选**可选择排序列和方向、保留标题行，并同时按多列的文字包含条件筛选。它只调整当前视图，编辑仍会写回对应记录。宿主可调用 `ColworkTable.setRowView()` 或 `openRowView()`。跨行合并涉及的相邻行会作为一组移动。保留标题行的边界如果穿过一个合并组，会保留整组。筛选时组内至少一行满足全部条件就会保留整组。增删行列前需清除当前视图。设置 `personalViewKey` 可在刷新后恢复筛选条件，请用宿主账号与文档 ID 组合出稳定的键。
 - **公式**可输入 `=A1*2`、`=SUM(B2:B8)`、`=IF(A1>0,"有值","空")` 或 `='预算表'!B2`。支持算术、比较、百分比、连接、范围、跨表引用，以及常用统计和逻辑函数，包括 `SUMIF`、`SUMIFS`、`COUNTIF`、`COUNTIFS` 和单值 `XLOOKUP`。新增公式将引用绑定到工作表和行列标识，改名、插行后引用仍指向原记录。被删除的引用显示 `#REF!`，循环引用显示 `#CYCLE!`。用 `'=` 开头可录入以等号开头的文本。
 - **Excel**支持 `.xlsx` 工作表、常见值、公式、合并、行列尺寸和 Colwork 支持的单元格格式。导入将工作表加到当前工作簿，独立的新建文档可传入 `{ replaceBlankMain: true }` 复用空白首页。导出使用共享顺序和全量可见工作表数据。导入上限为 10 MB、32 张工作表、十万单元格。支持往返常见的内嵌图片、内联下拉列表和单色条件格式。其他 Excel 函数可随公式往返保留。Excel 的宏、原生图表、原生数据透视表及高级规则暂未实现转换。
+- 宿主可为 `importXlsx()` 注册 `confirmWarnings(warnings)`。库检测到会省略的原生图表、透视表或部分高级规则时，会在上传图片和写入工作簿前调用。回调可异步展示清单，返回 `true` 继续，返回 `false` 取消。每条提示包含功能类型，图表及透视表提示带数量，能定位的规则提示带工作表名。已有调用方可继续使用原接口。
+- `exportXlsx()` 也接受 `confirmWarnings(warnings)`。导出检查会按工作表报告无法保留的图表、透视配置、单元格保护、部分下拉规则和将用说明替代的图片。库在读取图片资源后、生成文件之前调用回调，宿主可异步确认。若回调返回 `false`，导出会取消。配置确认回调时，读取图片失败也会作为一项差异交由宿主决定。
 
 ## 编辑及分析
 
 - 方向键移动，Shift + 方向键扩选，Tab 横向移动，Enter 提交并下移。F2、空格与直接输入可进入编辑。选中单元格后可从公式栏查看和修改原始内容。
 - 编辑期间收到同一单元格的新内容时，提交草稿前会询问是否覆盖。切换工作表会保留各表的本地撤销与重做记录。
-- 通过快捷键在 Colwork 中复制公式时，相对引用随粘贴位置移动。粘贴能扩展工作表的可视范围，支持外部表格中的带引号多行单元格。目标包含锁定单元格、违反数据验证或超出筛选视图时，会提示并拒绝整批写入。
+- 支持富剪贴板的浏览器中，右键菜单和快捷键在 Colwork 内复制时都保留格式，公式的相对引用随粘贴位置移动。浏览器限制富复制时，右键菜单回退到纯文本。粘贴能扩展工作表的可视范围，支持外部表格中的带引号多行单元格。目标包含锁定单元格、违反数据验证或超出筛选视图时，会提示并拒绝整批写入。
+- 右键选中目标单元格后打开「选择性粘贴」，选择方式并按 Ctrl/⌘ + V。「仅粘贴值」保留目标格式，来自新版 Colwork 的公式会粘贴为复制时的计算结果，外部纯文本按文字写入。「仅粘贴格式」使用 Colwork 剪贴板数据，保留目标内容和公式。
 - 从选区右下角拖动填充柄可复制格式和内容、延续等差数列，并移动公式的相对引用；公式中的绝对引用保持原位。填充范围需要为普通、可编辑的单元格。
 - Ctrl/⌘ + F 或工具栏「查找」可定位当前工作表视图中的内容。替换支持当前项和全部文本。
 - 「数据」菜单可配置下拉校验、包含／等于／大于／小于／空白高亮，以及以选区首行为标题的柱状图、折线图、行列分组透视汇总。分析设置随工作表同步，汇总可选择求和、计数和平均值。宿主可通过 `getSheetFeatureMaps(document, sheetId)` 获取规则和分析的 Yjs 根。
@@ -208,6 +211,7 @@ const viewPolicy: ColworkViewPolicy = {
     fixedText: permissions.addFixedWatermark ? permissions.fixedWatermarkText : undefined,
   },
   allowExport: permissions.allowExport === true,
+  versionPreview: permissions.allowExport === true ? 'full' : 'summary',
 }
 const table = new ColworkTable(container, { ...options, viewPolicy })
 
@@ -220,8 +224,9 @@ if (table.canExport()) {
 // 宿主收到新策略后调用 table.setViewPolicy(nextViewPolicy)。
 ```
 
-- `viewerText` 与 `fixedText` 独立生效，可以同时显示。空白文本关闭对应水印，长文本以省略号截断。水印随视口覆盖在表格上，删除水印节点或改写其属性后会自动恢复。每个实例独立应用策略，水印文字留在本机，不进入协作数据或存档。
+- `viewerText` 与 `fixedText` 独立生效，可以同时显示。空白文本关闭对应水印，长文本以省略号截断。水印覆盖表格视口和打开的版本历史窗口，删除水印节点或改写其属性后会自动恢复。每个实例独立应用策略，水印文字留在本机，不进入协作数据或存档。
 - `allowExport` 默认开启，兼容旧接入。关闭后，`canExport()` 返回 `false`，`getYjsSnapshot()` 和 `getYjsUpdateLog()` 抛出 `NotAllowedError`。宿主管理的后台保存可继续使用宿主持有的文档及模型 API。
+- `versionPreview` 默认是 `'full'`。设为 `'summary'` 时，版本对比展示变更数量、可用的单元格位置及规则类型，省略单元格内容。切换为摘要会立即移除已经呈现的内容，恢复完整模式后可重新预览。宿主可独立配置此选项及 `allowExport`，并负责鉴权及返回当前用户可读取的快照。
 - 宿主应从可信业务策略和当前登录身份生成配置，并在自己的文件下载或导出接口校验权限。浏览器内的水印与导出限制提供客户端防护，表格数据仍需交给浏览器渲染。
 
 从本地源码运行的 Vue 和 React 演示可用 `?viewerWatermark=1&fixedWatermark=1&allowExport=0` 查看两种水印和禁用导出的效果。查询参数只用于演示。
@@ -329,6 +334,17 @@ const changes = compareWorkbookSnapshots(previous, current, { maxExamples: 100 }
 2. 再升级同一房间的客户端。已有快照可直接读取，仍使用 0.4 的客户端只会显示旧顺序。用旧文档测试打开、拖动标签、持久化和重新打开。
 3. 需要版本预览时，为已有的 `versionHistory` 注册 `read` 回调，返回当前用户获准读取的 `WorkbookSnapshot`。版本存储、恢复操作和旧会话处理沿用宿主的接口。
 
+### 从 0.5 升级
+
+```sh
+npm install --save-exact @kuzuma/colwork@0.6.0
+```
+
+1. 更新使用 Colwork 的前端、协作服务及锁文件。使用仓库自带的 Cloudflare 部署时，先更新 `colwork-backend`，再更新 `colwork-frontend`。现有工作簿和版本快照沿用原格式。
+2. 如需显示保存状态，使用 `trackColworkWorkerSave(provider)` 连接配有 `createColworkWebSocket()` 的 Worker，或为自管协作服务使用 `ColworkSaveTracker`。订阅状态，在宿主选定的时机调用 `confirmSaved()`。调用前可用 `commitEditing()` 提交当前单元格输入。页面卸载时释放跟踪器。
+3. 为 `importXlsx()` 和 `exportXlsx()` 按需传入 `confirmWarnings`，由宿主显示差异并决定继续或取消。下载接口继续按宿主的现有授权执行。版本预览可由宿主用 `viewPolicy.versionPreview: 'summary'` 仅展示摘要，窗口会显示宿主提供的水印。
+4. 用已有工作簿验收双人编辑、保存回执、确认期间的新编辑、关闭后重开，以及带图表或保护的 XLSX 取消和继续流程。
+
 ## 开发
 
 ```sh
@@ -352,7 +368,7 @@ npm run dev -- --source=local
 npm run dev -- --source=npm
 ```
 
-npm 模式自动从官方 registry 安装 `@kuzuma/colwork@0.5.0` 到被 Git 忽略的 `.wrangler/npm-demo/`，不会修改项目依赖或锁文件；本地模式保留源码热更新。若要测试其他已发布版本，设置 `COLWORK_NPM_VERSION`：
+npm 模式自动从官方 registry 安装 `@kuzuma/colwork@0.6.0` 到被 Git 忽略的 `.wrangler/npm-demo/`，不会修改项目依赖或锁文件；本地模式保留源码热更新。若要测试其他已发布版本，设置 `COLWORK_NPM_VERSION`：
 
 ```sh
 COLWORK_NPM_VERSION=latest npm run dev -- --source=npm
@@ -415,9 +431,33 @@ OAuth 是 [Wrangler 的部署授权](https://developers.cloudflare.com/workers/w
 
 ### 大表协作
 
-本项目的 Cloudflare 后端支持双向 WebSocket 分帧。内置连接设置 `websocketChunks: true`，宿主管理的 `y-websocket` 连接可传入 `WebSocketPolyfill: createColworkWebSocket()`。兼容旧客户端的小消息。分帧后仍在完整接收并校验顺序后统一应用，重连继续使用 Yjs 状态向量补发遗漏的更新。分帧协作单次逻辑消息上限为 48 MiB。可用 `waitForColworkSync(provider.ws)` 在保存版本或显示导入完成前，等待当前连接已经发送的更新持久化。
+本项目的 Cloudflare 后端支持双向 WebSocket 分帧。内置连接设置 `websocketChunks: true`，宿主管理的 `y-websocket` 连接可传入 `WebSocketPolyfill: createColworkWebSocket()`。兼容旧客户端的小消息。分帧后仍在完整接收并校验顺序后统一应用，重连继续使用 Yjs 状态向量补发遗漏的更新。分帧协作单次逻辑消息上限为 48 MiB。
 
 Worker 追加保存当前文档的更新，并在 128 条或 8 MiB 时将日志合并为当前快照。合并沿用旧快照目录，业务版本历史由前述宿主接口保存。使用第三方协作服务时请按该服务的协议和消息大小接入。
+
+### 保存状态与落库回执
+
+连接状态 `connection`、初始同步 `synced` 和本地改动的确认状态 `persistence` 可分别展示。初始同步完成后，仍应等待存储确认再向用户显示已落库。组件的 `onEditingChange` 可额外提示尚未提交到 Yjs 的单元格输入。
+
+```ts
+import { trackColworkWorkerSave } from '@kuzuma/colwork'
+
+// provider 使用 WebSocketPolyfill: createColworkWebSocket() 连接 Colwork Worker。
+const saves = trackColworkWorkerSave(provider)
+const unsubscribe = saves.subscribe(renderSaveStatus)
+
+// 宿主在手动保存、导入后或发布版本前调用。
+workbook.commitEditing()
+const receipt = await saves.confirmSaved(signal)
+
+// 卸载时取消订阅并销毁跟踪器。
+unsubscribe()
+saves.destroy()
+```
+
+- `persistence` 提供 `unknown`、`pending`、`saving`、`saved` 和 `error`。回执的 `throughRevision` 是跟踪器内观察到的本地编辑序号，`confirmedAt` 是客户端收到确认的时间。确认期间出现的新改动保持待确认。远端更新默认不计入本地序号。宿主暂存并通过 `Y.applyUpdate` 应用导入时，可通过 `isLocalUpdate` 识别自己的导入来源。
+- 宿主自管传输或存储时，可用 `new ColworkSaveTracker(document)`、`setConnection(connection, synced)` 与 `confirmSaved(async ({ throughRevision, signal }) => { ... })`。确认函数应在对应的本地改动已写入后才返回。保存时机、重试、离线草稿和版本留存由宿主决定。
+- 底层的 `waitForColworkSync(socket)` 等待 Worker 确认此连接在请求之前已发送并应用的更新。新版 Worker 在存储写入完成后回执。跟踪器以当前已同步的可写连接发起确认，低层接口可用于宿主管理的其它调用流程。
 
 ### 发布后检查
 

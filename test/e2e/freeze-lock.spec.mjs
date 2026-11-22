@@ -705,6 +705,8 @@ test('frozen boundaries follow panes and grouped controls fit desktop and narrow
   await expect(menu.getByRole('group')).toHaveCount(4)
   await expect(menu.getByRole('button', { name: '复制', exact: true })).toBeFocused()
   await page.keyboard.press('ArrowDown')
+  await expect(menu.getByRole('button', { name: '选择性粘贴', exact: true })).toBeFocused()
+  await page.keyboard.press('ArrowDown')
   await expect(menu.getByRole('button', { name: '清空内容', exact: true })).toBeFocused()
   await page.screenshot({ path: testInfo.outputPath('organized-desktop.png') })
   await page.keyboard.press('Escape')

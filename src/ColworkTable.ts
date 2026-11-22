@@ -415,7 +415,7 @@ export class ColworkTable {
       refresh: () => { this.refreshSelection(); this.refreshCursors() }, render: () => { if (!this.destroyed) this.render() },
     })
     this.clipboard = new TableClipboard({
-      sheet: this.sheet, selection: this.selection, editing: this.editing, formatting: this.formatting,
+      viewport: this.viewport, sheet: this.sheet, selection: this.selection, editing: this.editing, formatting: this.formatting,
       canEdit: () => !this.readOnly && !this.destroyed,
       resize: (rows, columns) => {
         this.dimensions.rows = Math.max(this.dimensions.rows, rows)
@@ -438,6 +438,8 @@ export class ColworkTable {
     this.table.addEventListener('mousedown', this.onTableMouseDown)
     this.viewport.addEventListener('copy', this.clipboard.onCopy, true)
     this.viewport.addEventListener('paste', this.clipboard.onPaste, true)
+    this.viewport.ownerDocument.addEventListener('copy', this.clipboard.onDocumentClipboard, true)
+    this.viewport.ownerDocument.addEventListener('paste', this.clipboard.onDocumentClipboard, true)
     this.viewport.append(this.table)
     this.frozenBoundaryLayer = document.createElement('div')
     this.frozenBoundaryLayer.className = 'colwork-table__frozen-boundaries'
@@ -599,6 +601,7 @@ export class ColworkTable {
     this.viewport.classList.remove('is-resizing')
     this.cancelFill()
     this.pointer.cancel()
+    this.clipboard.closePasteOptions()
     this.dialogs.close()
     this.menu.hide()
     this.toolbar.hidden = readOnly
@@ -621,6 +624,7 @@ export class ColworkTable {
   #applyViewPolicy(policy: ColworkViewPolicy) {
     this.#allowExport = policy.allowExport === undefined || policy.allowExport === true
     this.#watermark.setText(policy.watermark)
+    this.versionDialog?.setViewPolicy(policy)
   }
 
   canExport() { return this.#allowExport }
@@ -1306,6 +1310,7 @@ export class ColworkTable {
     this.dataDialog?.remove()
     this.versionDialog?.close()
     this.viewportResizeObserver.disconnect()
+    this.clipboard.closePasteOptions()
     this.dialogs.close()
     this.editing.finish(false)
     this.archive.destroy()
@@ -1329,6 +1334,8 @@ export class ColworkTable {
     this.viewport.removeEventListener('keydown', this.onViewportKeyDown)
     this.viewport.removeEventListener('copy', this.clipboard.onCopy, true)
     this.viewport.removeEventListener('paste', this.clipboard.onPaste, true)
+    this.viewport.ownerDocument.removeEventListener('copy', this.clipboard.onDocumentClipboard, true)
+    this.viewport.ownerDocument.removeEventListener('paste', this.clipboard.onDocumentClipboard, true)
     this.table.removeEventListener('mousedown', this.onTableMouseDown)
     window.removeEventListener('mouseup', this.onWindowMouseUp)
     window.removeEventListener('mousemove', this.onWindowMouseMove)

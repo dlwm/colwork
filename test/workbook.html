@@ -12,6 +12,8 @@
           <label>导入 Excel <input id="import" type="file" accept=".xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" /></label>
           <button id="download" type="button">导出 Excel</button>
           <span id="status" role="status"></span>
+          <button id="confirm-save" type="button" hidden>确认落库</button>
+          <span id="save-status" role="status" aria-label="保存状态" hidden></span>
           <a class="user-settings__tool-link" href="/">返回首页</a>
         </div>
         <div id="table"></div>

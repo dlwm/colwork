@@ -1,7 +1,9 @@
 import type { YjsSnapshotFile } from './yjsArchive'
 import type { WorkbookSnapshot } from './model'
 import { compareWorkbookSnapshots } from './model-diff'
-import { renderVersionPreview } from './versionPreview'
+import { removeVersionPreviewValues, renderVersionPreview } from './versionPreview'
+import type { ColworkViewPolicy } from './options'
+import { TableWatermark } from './tableWatermark'
 
 export type ColworkVersion = { id: string; createdAt: string; label?: string; author?: string }
 export type ColworkVersionPage = { versions: ColworkVersion[]; nextCursor?: string }
@@ -21,23 +23,39 @@ export type ColworkVersionHistory = {
 
 export class VersionHistoryDialog {
   private dialog?: HTMLDialogElement
+  private preview?: HTMLElement
   private operation?: AbortController
+  private watermark?: TableWatermark
+  private watermarkText?: ColworkViewPolicy['watermark']
+  private showValues = true
   constructor(private readonly root: HTMLElement, private readonly adapter: ColworkVersionHistory,
     private readonly canEdit: () => boolean, private readonly capture: () => YjsSnapshotFile | undefined, private readonly current: () => WorkbookSnapshot) {}
+
+  setViewPolicy(policy: ColworkViewPolicy) {
+    this.showValues = policy.versionPreview !== 'summary'
+    if (!this.showValues && this.preview) removeVersionPreviewValues(this.preview)
+    this.watermarkText = policy.watermark && { ...policy.watermark }
+    this.watermark?.setText(this.watermarkText)
+  }
 
   close() {
     this.operation?.abort()
     this.operation = undefined
+    this.watermark?.destroy()
+    this.watermark = undefined
     this.dialog?.remove()
     this.dialog = undefined
+    this.preview = undefined
   }
 
   open() {
     if (this.dialog) return
     const doc = this.root.ownerDocument
     const dialog = doc.createElement('dialog')
-    dialog.className = 'colwork-table__feature-dialog'
+    dialog.className = 'colwork-table__feature-dialog colwork-table__version-dialog'
     dialog.setAttribute('aria-label', '版本历史')
+    const content = doc.createElement('div')
+    content.className = 'colwork-table__version-dialog-content'
     const heading = doc.createElement('h3')
     heading.textContent = '版本历史'
     const list = doc.createElement('ol')
@@ -116,7 +134,7 @@ export class VersionHistoryDialog {
               const [before, after] = await Promise.all([reference, selected])
               if (context.signal.aborted) return
               renderVersionPreview(preview, compareWorkbookSnapshots(before, after),
-                versions.get(baseId) ?? '当前工作簿', versions.get(version.id)!)
+                versions.get(baseId) ?? '当前工作簿', versions.get(version.id)!, this.showValues)
             })
           })
           previewButton.setAttribute('aria-label', `预览 ${version.label || '未命名版本'}`)
@@ -142,15 +160,15 @@ export class VersionHistoryDialog {
     const close = button('关闭', () => dialog.close())
     dialog.addEventListener('close', () => { if (this.dialog === dialog) this.close() }, { once: true })
     const refresh = button('刷新版本列表', () => { void request(context => load(context)) })
-    dialog.append(heading, refresh)
+    content.append(heading, refresh)
     if (this.adapter.read) {
       const baselineLabel = doc.createElement('label')
       baselineLabel.append('对比基准', baseline)
-      dialog.append(baselineLabel)
+      content.append(baselineLabel)
     }
-    dialog.append(list, status, more, preview)
+    content.append(list, status, more, preview)
     if (this.adapter.create && this.canEdit()) {
-      dialog.append(label, button('保存版本', () => {
+      content.append(label, button('保存版本', () => {
         if (!this.canEdit()) return
         void request(async context => {
           await this.adapter.create!({ ...context, label: label.value.trim() || undefined, snapshot: this.adapter.captureClientSnapshot ? this.capture() : undefined })
@@ -158,9 +176,13 @@ export class VersionHistoryDialog {
         })
       }))
     }
-    dialog.append(close)
+    content.append(close)
+    dialog.append(content)
     this.dialog = dialog
+    this.preview = preview
     this.root.append(dialog)
+    this.watermark = new TableWatermark(dialog, 'overlay')
+    this.watermark.setText(this.watermarkText)
     dialog.showModal()
     void request(context => load(context))
   }

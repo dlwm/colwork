@@ -65,12 +65,9 @@ test('clipboard moves relative references and pastes an entire quoted table past
   await formula.fill('=$B$2+B2')
   await formula.press('Enter')
   await cell(page, '1:2').click()
-  await page.evaluate(() => {
-    window.clip = new DataTransfer()
-    table.viewport.dispatchEvent(new ClipboardEvent('copy', { clipboardData: clip, bubbles: true, cancelable: true }))
-  })
+  await page.keyboard.press('ControlOrMeta+c')
   await cell(page, '2:2').click()
-  await page.evaluate(() => table.viewport.dispatchEvent(new ClipboardEvent('paste', { clipboardData: clip, bubbles: true, cancelable: true })))
+  await page.keyboard.press('ControlOrMeta+v')
   await expect(value(page, '2:2')).toHaveText('6')
   await cell(page, '2:2').click()
   await expect(formula).toHaveValue('=$B$2+B3')
@@ -78,11 +75,113 @@ test('clipboard moves relative references and pastes an entire quoted table past
   const result = await page.evaluate(() => {
     const clipboardData = new DataTransfer()
     clipboardData.setData('text/plain', ['"line 1\nline ""2"""\tfinal', ...Array.from({ length: 150 }, (_, index) => `row ${index}`)].join('\n'))
-    table.viewport.dispatchEvent(new ClipboardEvent('paste', { clipboardData, bubbles: true, cancelable: true }))
+    const event = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(event, 'clipboardData', { value: clipboardData })
+    table.viewport.dispatchEvent(event)
     const cells = model.getMap('cells')
     return [cells.get('0:3'), cells.get('0:4'), cells.get('150:3')]
   })
   expect(result).toEqual(['line 1\nline "2"', 'final', 'row 149'])
+})
+
+test('context menu and shortcut copy preserve formulas and formatting on the system clipboard', async ({ page }) => {
+  await mount(page)
+  await page.evaluate(() => {
+    model.getMap('cells').set('3:1', '8')
+    model.getMap('styles').set('1:2', JSON.stringify({ bold: true }))
+  })
+  const source = cell(page, '1:2')
+  const formula = page.getByRole('textbox', { name: '公式栏' })
+  await source.click()
+  await formula.fill('=$B$2+B2')
+  await formula.press('Enter')
+
+  await source.click({ button: 'right' })
+  await page.locator('.colwork-table__context-menu').getByRole('button', { name: '复制', exact: true }).click()
+  await cell(page, '2:2').click()
+  await page.keyboard.press('ControlOrMeta+v')
+  await expect(value(page, '2:2')).toHaveText('6')
+  await expect(value(page, '2:2')).toHaveCSS('font-weight', '700')
+  await expect(formula).toHaveValue('=$B$2+B3')
+
+  await source.click()
+  await page.keyboard.press('ControlOrMeta+c')
+  await cell(page, '3:2').click()
+  await page.keyboard.press('ControlOrMeta+v')
+  await expect(value(page, '3:2')).toHaveText('10')
+  await expect(value(page, '3:2')).toHaveCSS('font-weight', '700')
+  await expect(formula).toHaveValue('=$B$2+B4')
+})
+
+async function openPasteOptions(page, key, mode) {
+  await cell(page, key).click({ button: 'right' })
+  await button(page, '选择性粘贴').click()
+  const dialog = page.getByRole('dialog', { name: '选择性粘贴' })
+  await dialog.getByRole('combobox', { name: '粘贴方式' }).selectOption(mode)
+  return dialog.getByRole('textbox', { name: '粘贴区' })
+}
+
+test('paste special writes formula results or formatting independently', async ({ page }) => {
+  await mount(page)
+  await page.evaluate(() => {
+    model.getMap('styles').set('1:2', JSON.stringify({ bold: true }))
+    model.getMap('styles').set('2:2', JSON.stringify({ italic: true }))
+    model.getMap('cells').set('3:2', '=B2*3')
+  })
+  await cell(page, '1:2').click()
+  const formula = page.getByRole('textbox', { name: '公式栏' })
+  await formula.fill('=$B$2+B2')
+  await formula.press('Enter')
+  await cell(page, '1:2').click()
+  await page.keyboard.press('ControlOrMeta+c')
+
+  const values = await openPasteOptions(page, '2:2', 'values')
+  await values.press('ControlOrMeta+v')
+  await expect(value(page, '2:2')).toHaveText('4')
+  expect(await page.evaluate(() => model.getMap('cells').get('2:2'))).toBe('4')
+  expect(await page.evaluate(() => model.getMap('styles').get('2:2'))).toBe('{"italic":true}')
+
+  const styles = await openPasteOptions(page, '3:2', 'styles')
+  await styles.press('ControlOrMeta+v')
+  await expect(value(page, '3:2')).toHaveCSS('font-weight', '700')
+  expect(await page.evaluate(() => model.getMap('cells').get('3:2'))).toBe('=B2*3')
+  await page.evaluate(() => model.getMap('cells').set('1:1', '5'))
+  await expect(value(page, '3:2')).toHaveText('15')
+  await expect(value(page, '2:2')).toHaveText('4')
+})
+
+test('paste special keeps locks and validation atomic and treats external formula text as a value', async ({ page }) => {
+  await mount(page)
+  await page.evaluate(() => {
+    model.getMap('locks').set('2:1', '1')
+    model.getMap('colwork-validation').set('1:1-1:1', JSON.stringify({ choices: ['2'] }))
+  })
+  const pasteText = (target, text) => target.evaluate((element, text) => {
+    const clipboardData = new DataTransfer()
+    clipboardData.setData('text/plain', text)
+    const event = new Event('paste', { bubbles: true, cancelable: true })
+    Object.defineProperty(event, 'clipboardData', { value: clipboardData })
+    element.dispatchEvent(event)
+  }, text)
+  const alert = page.getByRole('alertdialog')
+  await pasteText(await openPasteOptions(page, '1:0', 'values'), 'changed\t2\nother\t4')
+  await expect(alert).toContainText('粘贴范围包含锁定单元格')
+  await button(alert, '确定').click()
+  await expect(value(page, '1:0')).toHaveText('Alpha')
+  await expect(value(page, '2:0')).toHaveText('Beta')
+
+  await pasteText(await openPasteOptions(page, '1:0', 'values'), 'changed\tinvalid')
+  await expect(alert).toContainText('粘贴内容不符合数据验证规则')
+  await button(alert, '确定').click()
+  await expect(value(page, '1:0')).toHaveText('Alpha')
+
+  await pasteText(await openPasteOptions(page, '0:2', 'values'), '=1+2')
+  await expect(value(page, '0:2')).toHaveText('=1+2')
+  expect(await page.evaluate(() => model.getMap('cells').get('0:2'))).toBe("'=1+2")
+
+  await pasteText(await openPasteOptions(page, '0:2', 'styles'), 'plain')
+  await expect(alert).toContainText('仅粘贴格式需要从 Colwork 表格复制单元格')
+  await expect(value(page, '0:2')).toHaveText('=1+2')
 })
 
 test('remote edits to a drafted cell require confirmation before replacement', async ({ page }) => {

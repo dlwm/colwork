@@ -19,6 +19,8 @@ export type ColworkRowView = {
 export type ColworkViewPolicy = {
   watermark?: { viewerText?: string; fixedText?: string }
   allowExport?: boolean
+  /** Controls whether version comparisons display cell values. Defaults to full. */
+  versionPreview?: 'full' | 'summary'
 }
 
 type CommonOptions = {

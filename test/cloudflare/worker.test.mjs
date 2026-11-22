@@ -14,7 +14,7 @@ import { chromium } from '@playwright/test'
 import { verifyDeployment } from '../../script/deploy-cloudflare.mjs'
 import { syncRequest, syncUpdate } from '../../server/cloudflare/protocol.mjs'
 import ExcelJS from 'exceljs'
-import { isSocketChunk, sendSocketMessage, SocketMessageReader } from '../../src/socketFrames.ts'
+import { isSocketChunk, sendSocketMessage, socketReceipt, SocketMessageReader } from '../../src/socketFrames.ts'
 
 class ChunkedTestSocket extends WebSocket {
   reader = new SocketMessageReader()
@@ -215,6 +215,23 @@ test('Cloudflare runtime: HTTP, Yjs, presence, room isolation, browser and resta
     for (let i = 0; i < 130; i++) writer.doc.getMap('cells').set('0:1', String(i))
     await until(() => reader.doc.getMap('cells').get('0:1') === '129')
   })
+  await t.test('workbook exposes a save receipt only after explicit Worker confirmation', async () => {
+    const page = await browser.newPage()
+    try {
+      const badge = page.locator('#save-status')
+      await page.goto(`${base}/test/workbook?room=save-receipt`)
+      await until(async () => (await badge.textContent()).includes('初始同步完成'))
+      assert.doesNotMatch(await badge.textContent(), /已确认落库/)
+      await page.locator('td[data-key="0:0"]').click()
+      const input = page.getByRole('textbox', { name: '公式栏' })
+      await input.fill('confirmed after restart')
+      await until(async () => (await badge.textContent()).includes('有未提交的单元格输入'))
+      await input.press('Enter')
+      await until(async () => (await badge.textContent()).includes('有未确认落库的改动'))
+      await page.getByRole('button', { name: '确认落库' }).click()
+      await until(async () => (await badge.textContent()).includes('已确认落库'))
+    } finally { await page.close() }
+  })
   await t.test('large document and protection survive Worker restart', async () => {
     const map = second.doc.getMap('cells')
     second.doc.transact(() => {
@@ -238,6 +255,8 @@ test('Cloudflare runtime: HTTP, Yjs, presence, room isolation, browser and resta
     const offline = await connect('offline-chunked', 'after-restart', true)
     assert.equal(offline.doc.getMap('cells').size, 1201)
     assert.equal(offline.doc.getMap('cells').get('0:1'), '129')
+    const confirmed = await connect('workbook-save-receipt')
+    assert.equal(confirmed.doc.getMap('cells').get('0:0'), 'confirmed after restart')
     const chunked = await browser.newPage()
     try {
       await chunked.goto(`${base}/test/workbook?room=chunked-excel`)
@@ -317,7 +336,7 @@ test('Cloudflare runtime: HTTP, Yjs, presence, room isolation, browser and resta
       await until(async () => await read.locator('td[data-key="0:1"] .colwork-table__cell-value').textContent() === '24')
 
       const readOnlySocket = await new Promise((resolve, reject) => {
-        const socket = new WebSocket(base.replace('http:', 'ws:') + `/rooms/private/${room}`, {
+        const socket = new WebSocket(base.replace('http:', 'ws:') + `/rooms/private/${room}?colworkChunks=1`, {
           headers: { Cookie: cookie(viewerToken), Origin: base },
         })
         socket.on('error', reject)
@@ -337,6 +356,9 @@ test('Cloudflare runtime: HTTP, Yjs, presence, room isolation, browser and resta
         readOnlySocket.send(syncRequest(forged))
         await confirmed
         forged.destroy()
+        const closed = new Promise(resolve => readOnlySocket.once('close', resolve))
+        readOnlySocket.send(socketReceipt(1))
+        assert.equal(await closed, 1008)
       } finally { readOnlySocket.close() }
       const response = await request('export', editorToken)
       assert.equal(response.status, 200)

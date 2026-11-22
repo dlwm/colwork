@@ -115,6 +115,62 @@ test('export policy gates snapshot and update log without changing host data', a
   await expect(page.locator(overlaySelector)).toHaveCount(0)
 })
 
+test('version comparisons carry the watermark and remove values when the host switches to summaries', async ({ page }) => {
+  await mount(page)
+  await page.evaluate(async () => {
+    const { readWorkbookSnapshot } = await import('/src/index.ts')
+    doc.getMap('cells').set('0:0', '旧版私有值')
+    const archived = readWorkbookSnapshot(doc)
+    doc.getMap('cells').set('0:0', '当前私有值')
+    const Table = table.constructor
+    table.destroy()
+    window.table = new Table(document.querySelector('#table'), {
+      ...options,
+      viewPolicy: { allowExport: false, watermark: { viewerText: '查看者 17' } },
+      versionHistory: {
+        documentId: 'policy-test',
+        async list() { return { versions: [{ id: 'first', label: '初版', createdAt: '2026-11-01T00:00:00Z' }] } },
+        async read() {
+          if (window.deferVersionRead) await new Promise(resolve => { window.completeVersionRead = resolve })
+          return archived
+        },
+      },
+    })
+    table.openVersionHistory()
+  })
+  const history = page.getByRole('dialog', { name: '版本历史' })
+  const preview = history.getByRole('region', { name: '版本差异' })
+  const overlay = history.locator(overlaySelector)
+  const openPreview = history.getByRole('button', { name: '预览 初版' })
+  await expect(overlay).toBeVisible()
+  expect(await watermarkText(overlay)).toEqual(['查看者 17'])
+  await openPreview.click()
+  await expect(preview).toContainText('当前私有值')
+  await expect(preview).toContainText('旧版私有值')
+  const [frame, drawing] = await Promise.all([history.boundingBox(), overlay.boundingBox()])
+  expect(drawing.height).toBeGreaterThanOrEqual(frame.height - 2)
+  await page.evaluate(() => table.setViewPolicy({ allowExport: false, versionPreview: 'summary', watermark: { fixedText: '内部资料' } }))
+  await expect(preview).toContainText('1 个单元格')
+  await expect(preview.getByRole('rowheader', { name: 'A1' })).toBeVisible()
+  await expect(preview.getByRole('cell')).toHaveCount(0)
+  await expect(preview).not.toContainText(/私有值/)
+  expect(await watermarkText(overlay)).toEqual(['内部资料'])
+
+  await page.evaluate(() => {
+    window.deferVersionRead = true
+    table.setViewPolicy({ versionPreview: 'full' })
+  })
+  await openPreview.click()
+  await page.waitForFunction(() => typeof window.completeVersionRead === 'function')
+  await page.evaluate(() => {
+    table.setViewPolicy({ versionPreview: 'summary' })
+    window.completeVersionRead()
+  })
+  await expect(preview.getByRole('rowheader', { name: 'A1' })).toBeVisible()
+  await expect(preview).not.toContainText(/私有值/)
+  await expect(overlay).toHaveCount(0)
+})
+
 test('Vue and React demos honor export settings for both download buttons', async ({ page }) => {
   await page.route('http://127.0.0.1:4444/api/users', route => route.fulfill({
     status: 200, body: '{}', headers: { 'access-control-allow-origin': '*', 'access-control-allow-methods': 'POST, OPTIONS', 'access-control-allow-headers': 'content-type' },

@@ -109,6 +109,46 @@ test('workbook page uploads and downloads actual Excel files in the browser', as
   expect(exported.getWorksheet('Imported').getCell('B1').result).toBe(42)
 })
 
+test('Excel import reports omitted rules and can be canceled before creating sheets', async ({ page }) => {
+  const fixture = new ExcelJS.Workbook()
+  const sheet = fixture.addWorksheet('Advanced')
+  sheet.getCell('A1').value = 12
+  sheet.getCell('B2').dataValidation = { type: 'whole', operator: 'between', formulae: [1, 10] }
+  const file = { name: 'advanced.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    buffer: Buffer.from(await fixture.xlsx.writeBuffer()) }
+  await page.goto('/test/workbook.html')
+  let message = ''
+  page.once('dialog', async dialog => { message = dialog.message(); await dialog.dismiss() })
+  await page.locator('#import').setInputFiles(file)
+  await expect(page.locator('#status')).toHaveText('已取消导入 Excel')
+  expect(message).toContain('Advanced · 部分数据验证规则')
+  const imported = page.getByRole('button', { name: 'Advanced', exact: true })
+  await expect(imported).toHaveCount(0)
+  page.once('dialog', dialog => dialog.accept())
+  await page.locator('#import').setInputFiles(file)
+  await expect(imported).toBeVisible()
+  await expect(value(page, 'table', '0:0')).toHaveText('12')
+})
+
+test('Excel export asks before downloading a workbook that would omit protections', async ({ page }) => {
+  await page.goto('/test/workbook.html')
+  await cell(page, 'table', '0:0').click()
+  await page.getByRole('button', { name: '保护', exact: true }).click()
+  await page.locator('.colwork-table__context-menu').getByRole('button', { name: '锁定选区', exact: true }).click()
+  await expect(cell(page, 'table', '0:0')).toHaveAttribute('aria-readonly', 'true')
+  let downloads = 0
+  let message = ''
+  page.on('download', () => { downloads++ })
+  page.once('dialog', async dialog => { message = dialog.message(); await dialog.dismiss() })
+  await page.locator('#download').click()
+  await expect(page.locator('#status')).toHaveText('已取消导出 Excel')
+  expect(message).toContain('项目清单 · 单元格保护将省略')
+  expect(downloads).toBe(0)
+  page.once('dialog', dialog => dialog.accept())
+  const [download] = await Promise.all([page.waitForEvent('download'), page.locator('#download').click()])
+  expect(download.suggestedFilename()).toBe('colwork.xlsx')
+})
+
 test('dragging a tab synchronizes its order without switching the peer tab', async ({ page }) => {
   await mountPeers(page)
   const local = page.locator('#table')

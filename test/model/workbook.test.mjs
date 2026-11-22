@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import * as Y from 'yjs'
 import ExcelJS from 'exceljs'
 import JSZip from 'jszip'
-import { getSheetMaps, listWorkbookSheets, readSheetSnapshot, setWorkbookSheetName } from '../../dist/model.js'
+import { getSheetFeatureMaps, getSheetMaps, listWorkbookSheets, readSheetSnapshot, setWorkbookSheetName } from '../../dist/model.js'
 import { exportXlsx, importXlsx } from '../../dist/xlsx.js'
 
 const arrayBuffer = value => Uint8Array.from(value).buffer
@@ -111,6 +111,48 @@ test('imports valid XLSX parts that use a prefix for SpreadsheetML tags', async 
   } finally { doc.destroy() }
 })
 
+test('Excel warns before uploading images or writing detected losses and lets the host cancel', async () => {
+  const workbook = new ExcelJS.Workbook()
+  const sheet = workbook.addWorksheet('Advanced')
+  sheet.getCell('A1').value = 12
+  sheet.getCell('B2').dataValidation = { type: 'whole', operator: 'between', formulae: [1, 10] }
+  sheet.addConditionalFormatting({ ref: 'A1', rules: [{ type: 'expression', formulae: ['A1>10'], priority: 1,
+    style: { font: { bold: true } } }] })
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6CYAAAAASUVORK5CYII=', 'base64')
+  sheet.addImage(workbook.addImage({ extension: 'png', buffer: png }), 'C1:C1')
+  const zip = await JSZip.loadAsync(await workbook.xlsx.writeBuffer())
+  const manifest = await zip.file('[Content_Types].xml').async('string')
+  zip.file('[Content_Types].xml', manifest.replace('</Types>', '<Override PartName="/xl/charts/monthly.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>'))
+  zip.file('xl/charts/monthly.xml', '<chartSpace/>')
+  zip.file('xl/pivotTables/pivotTable1.xml', '<pivotTableDefinition/>')
+  const bytes = await zip.generateAsync({ type: 'arraybuffer' })
+  const doc = new Y.Doc()
+  try {
+    const before = Y.encodeStateAsUpdate(doc)
+    const calls = []
+    let accept = false
+    const options = {
+      async confirmWarnings(warnings) {
+        calls.push('confirm')
+        assert.deepEqual(warnings, [
+          { feature: 'charts', count: 1 }, { feature: 'pivotTables', count: 1 },
+          { feature: 'dataValidation', sheet: 'Advanced' }, { feature: 'conditionalFormatting', sheet: 'Advanced' },
+        ])
+        assert.deepEqual(Y.encodeStateAsUpdate(doc), before)
+        return accept
+      },
+      async uploadImage() { calls.push('upload'); return { id: 'approved-image' } },
+    }
+    await assert.rejects(importXlsx(doc, bytes, options), /已取消导入 Excel/)
+    assert.deepEqual(calls, ['confirm'])
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), before)
+    accept = true
+    const [id] = await importXlsx(doc, bytes, options)
+    assert.deepEqual(calls, ['confirm', 'confirm', 'upload'])
+    assert.equal(readSheetSnapshot(doc, {}, id).cells['0:0'], '12')
+  } finally { doc.destroy() }
+})
+
 test('Excel picture bytes and common rules round-trip through host image callbacks', async () => {
   const workbook = new ExcelJS.Workbook()
   const sheet = workbook.addWorksheet('Assets')
@@ -122,6 +164,7 @@ test('Excel picture bytes and common rules round-trip through host image callbac
   const doc = new Y.Doc()
   try {
     const [id] = await importXlsx(doc, arrayBuffer(await workbook.xlsx.writeBuffer()), {
+      confirmWarnings() { throw new Error('Supported rules should import without a warning') },
       async uploadImage({ bytes, mimeType }) {
         assert.equal(mimeType, 'image/png')
         assert.deepEqual(Buffer.from(bytes), png)
@@ -139,6 +182,47 @@ test('Excel picture bytes and common rules round-trip through host image callbac
     assert.equal(restored.conditionalFormattings[0].rules[0].style.fill.fgColor.argb, 'FFFEDCBA')
     assert.equal(restored.getImages().length, 1)
     assert.deepEqual(output.getImage(restored.getImages()[0].imageId).buffer, png)
+  } finally { doc.destroy() }
+})
+
+test('Excel export reports omitted features and image fallback before generating a file', async () => {
+  const source = new ExcelJS.Workbook()
+  const sheet = source.addWorksheet('Export')
+  sheet.getCell('A1').value = 'keep'
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6CYAAAAASUVORK5CYII=', 'base64')
+  sheet.addImage(source.addImage({ extension: 'png', buffer: png }), 'B2:B2')
+  const doc = new Y.Doc()
+  try {
+    const [id] = await importXlsx(doc, arrayBuffer(await source.xlsx.writeBuffer()), {
+      replaceBlankMain: true, async uploadImage() { return { id: 'export-asset', alt: '附件说明' } },
+    })
+    const { analyses, validation } = getSheetFeatureMaps(doc, id)
+    const analysis = { name: '预算', range: '0:0-1:1', group: '0', value: '1', summarize: 'sum' }
+    analyses.set('a'.repeat(32), JSON.stringify({ ...analysis, kind: 'bar' }))
+    analyses.set('b'.repeat(32), JSON.stringify({ ...analysis, kind: 'pivot' }))
+    validation.set('0:2-0:2', JSON.stringify({ choices: ['带,逗号'] }))
+    getSheetMaps(doc, id).locks.set('0:0', '1')
+    const before = Y.encodeStateAsUpdate(doc)
+    const readImage = async () => { throw new Error('image not available') }
+    await assert.rejects(exportXlsx(doc, { readImage }), /image not available/)
+    let allow = false
+    const options = { readImage, async confirmWarnings(warnings) {
+      assert.deepEqual(warnings.map(({ feature, sheet, count }) => [feature, sheet, count]), [
+        ['charts', 'Export', 1], ['pivotTables', 'Export', 1], ['protection', 'Export', 1],
+        ['images', 'Export', 1], ['dataValidation', 'Export', 1],
+      ])
+      return allow
+    } }
+    await assert.rejects(exportXlsx(doc, options), /已取消导出 Excel/)
+    assert.deepEqual(Y.encodeStateAsUpdate(doc), before)
+    allow = true
+    const output = new ExcelJS.Workbook()
+    await output.xlsx.load(arrayBuffer(await exportXlsx(doc, options)))
+    const exported = output.getWorksheet('Export')
+    assert.equal(exported.getCell('A1').value, 'keep')
+    assert.equal(exported.getCell('B2').value, '附件说明')
+    assert.equal(exported.getImages().length, 0)
+    assert.equal(exported.getCell('C1').dataValidation, undefined)
   } finally { doc.destroy() }
 })
 

@@ -7,7 +7,7 @@ import { mergeKey, parseCellKey } from './model-schema'
 import { SheetCoordinates } from './sheetCoordinates'
 import { encodeCellImage, imageLabel, readCellImage, type ColworkImageRef } from './cellImage'
 import { cellKey, type CellPosition, type CellRange } from './range'
-import { getSheetFeatureMaps, isConditionalFormat, isDataValidation, readFeature, type ColworkConditionalFormat, type ColworkDataValidation } from './sheetFeatures'
+import { getSheetFeatureMaps, isAnalysis, isConditionalFormat, isDataValidation, readFeature, type ColworkConditionalFormat, type ColworkDataValidation } from './sheetFeatures'
 import { checkSheetCapacity, listWorkbookSheets, MAIN_SHEET_ID, makeSheetId, normalizeSheetName, workbookOrderRoot, workbookRoot } from './workbookModel'
 
 const maxRows = 100000
@@ -21,15 +21,27 @@ const maxMerges = 1000
 const borderSides = ['top', 'right', 'bottom', 'left'] as const
 const numberFormats = { general: 'General', number: '#,##0.########', date: 'yyyy-mm-dd', percent: '0.00%' } as const
 export type ColworkXlsxImage = { bytes: Uint8Array; mimeType: string }
+export type XlsxImportWarning =
+  | { feature: 'charts' | 'pivotTables'; count: number }
+  | { feature: 'conditionalFormatting' | 'dataValidation'; sheet?: string }
 export type XlsxImportOptions = {
   replaceBlankMain?: boolean
   /** Optional host limit for the resulting visible workbook, up to the converter's limit. */
   maxSheets?: number
   canApply?: () => boolean
+  /** Called only for detected losses, before image uploads or changes to the workbook. */
+  confirmWarnings?: (warnings: readonly XlsxImportWarning[]) => boolean | Promise<boolean>
   uploadImage?: (image: ColworkXlsxImage & { name: string }) => Promise<ColworkImageRef>
 }
+export type XlsxExportWarning = Readonly<{
+  feature: 'charts' | 'pivotTables' | 'images' | 'dataValidation' | 'protection'
+  sheet: string
+  count: number
+}>
 export type XlsxExportOptions = {
   readImage?: (image: ColworkImageRef) => Promise<ColworkXlsxImage | undefined>
+  /** Called for detected losses after asset reads and before generating the XLSX file. */
+  confirmWarnings?: (warnings: readonly XlsxExportWarning[]) => boolean | Promise<boolean>
 }
 const imageMime = { png: 'image/png', jpeg: 'image/jpeg', gif: 'image/gif' } as const
 const maxXlsxImages = 300
@@ -108,11 +120,22 @@ async function preflight(bytes: ArrayBuffer) {
   if (zip.file(/(?:^|\/)vbaProject\.bin$/i).length) throw new Error('请将带宏的 Excel 文件另存为 XLSX 后导入')
   const sheets = zip.file(/^xl\/worksheets\/[^/]+\.xml$/i)
   if (sheets.length > maxSheets) throw new RangeError('Excel 最多支持 32 张工作表')
+  const warnings: XlsxImportWarning[] = []
+  const manifest = await zip.file('[Content_Types].xml')?.async('string') ?? ''
+  const partTypes = [...manifest.matchAll(/<(?:[\w.-]+:)?Override\b[^>]*\bContentType\s*=\s*(["'])([^"']+)\1/gi)]
+    .map(match => match[2].toLowerCase())
+  const charts = Math.max(zip.file(/^xl\/charts\/chart(?:ex)?\d+\.xml$/i).length, partTypes.filter(type =>
+    type === 'application/vnd.openxmlformats-officedocument.drawingml.chart+xml' || type === 'application/vnd.ms-office.chartex+xml').length)
+  const pivots = Math.max(zip.file(/^xl\/pivottables\/pivottable\d+\.xml$/i).length, partTypes.filter(type =>
+    type === 'application/vnd.openxmlformats-officedocument.spreadsheetml.pivottable+xml').length)
+  if (charts) warnings.push({ feature: 'charts', count: charts })
+  if (pivots) warnings.push({ feature: 'pivotTables', count: pivots })
   let cellCount = 0
   let mergeCount = 0
   let mergeArea = 0
   let validationArea = 0
   let normalized = false
+  let extendedValidation = false
   const normalize = (name: string, xml: string) => {
     const compatible = normalizeSpreadsheetXml(xml)
     if (compatible === xml) return
@@ -121,6 +144,11 @@ async function preflight(bytes: ArrayBuffer) {
   }
   for (const file of sheets) {
     const xml = await file.async('string')
+    if (!extendedValidation) {
+      const extensionPrefixes = new Set([...xml.matchAll(/xmlns:([\w.-]+)\s*=\s*["']http:\/\/schemas\.microsoft\.com\/office\/spreadsheetml\/2009\/9\/main["']/g)].map(match => match[1]))
+      extendedValidation = extensionPrefixes.size > 0
+        && [...xml.matchAll(/<([\w.-]+):dataValidations?\b/g)].some(match => extensionPrefixes.has(match[1]))
+    }
     for (const match of xml.matchAll(/<(?:[\w.-]+:)?row\b[^>]*\br\s*=\s*["']([^"']+)["']/gi)) parseAddress('A' + match[1])
     for (const match of xml.matchAll(/<(?:[\w.-]+:)?c\b[^>]*\br\s*=\s*["']([^"']+)["']/gi)) {
       parseAddress(match[1])
@@ -144,7 +172,8 @@ async function preflight(bytes: ArrayBuffer) {
     const file = zip.file(name)
     if (file) normalize(name, await file.async('string'))
   }
-  return normalized ? zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' }) : bytes
+  if (extendedValidation) warnings.push({ feature: 'dataValidation' })
+  return { bytes: normalized ? await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' }) : bytes, warnings }
 }
 
 function toCss(argb?: string) {
@@ -193,15 +222,16 @@ function readValue(cell: Cell): Pick<ImportCell, 'value' | 'formula'> {
   return { value: text.startsWith('=') ? "'" + text : text, formula: false }
 }
 
-function readValidationRules(rules: Record<string, DataValidation>): ImportSheet['validation'] {
+function readValidationRules(rules: Record<string, DataValidation>) {
   const byRule = new Map<string, { rule: ColworkDataValidation; positions: CellPosition[] }>()
+  let omitted = false
   for (const [address, rule] of Object.entries(rules)) {
     const formula = rule.formulae?.[0]
-    if (rule.type !== 'list' || typeof formula !== 'string' || !/^"[^"]*"$/.test(formula)) continue
+    if (rule.type !== 'list' || typeof formula !== 'string' || !/^"[^"]*"$/.test(formula)) { omitted = true; continue }
     let group = byRule.get(formula)
     if (!group) {
       const definition = { choices: [...new Set(formula.slice(1, -1).split(','))] }
-      if (!isDataValidation(definition)) continue
+      if (!isDataValidation(definition)) { omitted = true; continue }
       group = { rule: definition, positions: [] }
       byRule.set(formula, group)
     }
@@ -227,10 +257,10 @@ function readValidationRules(rules: Record<string, DataValidation>): ImportSheet
     }
     for (const range of ranges) result.push([mergeKey(range), rule])
   }
-  return result
+  return { validation: result, omitted }
 }
 
-function readWorksheet(sheet: Worksheet): ImportSheet {
+function readWorksheet(sheet: Worksheet, warnings: XlsxImportWarning[]): ImportSheet {
   // ExcelJS exposes sparse rows with string addresses in its runtime model.
   const { rows, merges } = sheet.model as WorksheetModel & { rows: Array<Omit<RowModel, 'cells'> & { cells: Array<{ address: string }> }> }
   if (merges.length > maxMerges) throw new RangeError('Excel 合并区域过多')
@@ -258,12 +288,16 @@ function readWorksheet(sheet: Worksheet): ImportSheet {
     dataValidations?: Record<string, DataValidation>
     conditionalFormattings?: ConditionalFormattingOptions[]
   }
-  const validation = readValidationRules(model.dataValidations ?? {})
+  const { validation, omitted } = readValidationRules(model.dataValidations ?? {})
+  if (omitted) warnings.push({ feature: 'dataValidation', sheet: sheet.name })
   const conditional: ImportSheet['conditional'] = []
+  let omittedConditional = false
   for (const group of model.conditionalFormattings ?? []) {
+    let imported = false
     for (const rule of group.rules) {
+      if (imported) { omittedConditional = true; continue }
       const fill = rule.style?.fill
-      if (fill?.type !== 'pattern' || fill.pattern !== 'solid') continue
+      if (fill?.type !== 'pattern' || fill.pattern !== 'solid') { omittedConditional = true; continue }
       const background = toCss(fill.fgColor?.argb)
       let operator: ColworkConditionalFormat['operator']
       let value: string
@@ -274,26 +308,28 @@ function readWorksheet(sheet: Worksheet): ImportSheet {
         const expression = String(rule.formulae?.[0] ?? '')
         if (/^"(?:""|[^"])*"$/.test(expression)) value = expression.slice(1, -1).replace(/""/g, '"')
         else if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(expression)) value = expression
-        else continue
-      } else continue
+        else { omittedConditional = true; continue }
+      } else { omittedConditional = true; continue }
       const definition = { operator, value, background }
-      if (!isConditionalFormat(definition)) continue
+      if (!isConditionalFormat(definition)) { omittedConditional = true; continue }
       for (const address of group.ref.trim().split(/\s+/)) conditional.push([mergeKey(parseMerge(address, maxRows * maxColumns)), definition])
-      break
+      imported = true
+      if (rule.style && Object.entries(rule.style).some(([key, value]) => key !== 'fill' && value != null)) omittedConditional = true
     }
   }
+  if (omittedConditional) warnings.push({ feature: 'conditionalFormatting', sheet: sheet.name })
   return { name: normalizeSheetName(sheet.name), cells, merges: merges.map(value => parseMerge(value)), rowHeights, columnWidths,
     conditional, validation, imageRefs: new Map() }
 }
 
 /** Imports a workbook into the shared Y.Doc in one transaction. Existing sheets are preserved. */
 export async function importXlsx(document: Y.Doc, input: ArrayBuffer, options: XlsxImportOptions = {}): Promise<string[]> {
-  const compatible = await preflight(input)
+  const { bytes, warnings } = await preflight(input)
   const { default: ExcelJS } = await import('exceljs')
   const workbook = new ExcelJS.Workbook()
-  await workbook.xlsx.load(compatible)
+  await workbook.xlsx.load(bytes)
   if (!workbook.worksheets.length || workbook.worksheets.length > maxSheets) throw new RangeError('Excel 工作表数量无效')
-  const sheets = workbook.worksheets.map(readWorksheet)
+  const sheets = workbook.worksheets.map(sheet => readWorksheet(sheet, warnings))
   if (sheets.reduce((total, sheet) => total + sheet.cells.length, 0) > maxCells) throw new RangeError('Excel 最多导入十万个单元格')
   const importTarget = () => {
     const existing = listWorkbookSheets(document)
@@ -306,7 +342,14 @@ export async function importXlsx(document: Y.Doc, input: ArrayBuffer, options: X
     checkSheetCapacity(count, maxSheets)
     return { existing, replaceBlank }
   }
-  const target = importTarget()
+  let target = importTarget()
+  const confirmWarnings = warnings.length ? options.confirmWarnings : undefined
+  if (confirmWarnings) {
+    if (options.canApply && !options.canApply()) throw new Error('当前无法编辑工作簿，导入已取消')
+    if (!await confirmWarnings(warnings)) throw new Error('已取消导入 Excel')
+    if (options.canApply && !options.canApply()) throw new Error('当前无法编辑工作簿，导入已取消')
+    target = importTarget()
+  }
   if (options.uploadImage) {
     const distinct = new Map<number, ColworkImageRef>()
     let anchors = 0
@@ -409,6 +452,8 @@ export async function exportXlsx(document: Y.Doc, options: XlsxExportOptions = {
   let totalCells = 0
   let imageCount = 0
   const images = new Map<string, number | undefined>()
+  const warnings: XlsxExportWarning[] = []
+  const confirmWarnings = options.confirmWarnings
   // Snapshot the source before asynchronous asset retrieval can yield to collaboration updates.
   const sourceSheets = sheets.map(sheet => ({
     ...sheet, snapshot: readSheetSnapshot(document, { maxRows, maxColumns, maxMerges, maxMergeArea, mergeConflicts: 'resolve' }, sheet.id),
@@ -416,11 +461,22 @@ export async function exportXlsx(document: Y.Doc, options: XlsxExportOptions = {
   })).map(sheet => ({
     ...sheet, validation: [...sheet.features.validation].map(([key, value]) => [sheet.coordinates.mergeRange(key), value] as const),
     conditional: [...sheet.features.conditional].map(([key, value]) => [sheet.coordinates.mergeRange(key), value] as const),
+    analyses: [...sheet.features.analyses.values()].flatMap(raw => {
+      const analysis = readFeature(raw, isAnalysis)
+      return analysis && sheet.coordinates.mergeRange(analysis.range) ? [analysis.kind] : []
+    }),
     values: new Map(Object.entries(sheet.snapshot.cells).filter(([, raw]) => raw.startsWith('=')).map(([key]) =>
       [key, formulas.value(sheet.id, sheet.coordinates.cellId(key)!)])),
   }))
-  for (const { name, snapshot, validation, conditional, values } of sourceSheets) {
+  for (const { name, snapshot, validation, conditional, analyses, values } of sourceSheets) {
     const sheet = workbook.addWorksheet(name)
+    const differences = {
+      charts: analyses.filter(kind => kind !== 'pivot').length,
+      pivotTables: analyses.filter(kind => kind === 'pivot').length,
+      protection: Object.keys(snapshot.locks).length,
+      images: 0,
+      dataValidation: 0,
+    }
     const keys = new Set([...Object.keys(snapshot.cells), ...Object.keys(snapshot.styles)])
     totalCells += keys.size
     if (totalCells > maxCells) throw new RangeError('Excel 最多导出十万个单元格')
@@ -433,20 +489,24 @@ export async function exportXlsx(document: Y.Doc, options: XlsxExportOptions = {
       const value = image ? undefined : raw
       if (image) {
         cell.value = imageLabel(image)
+        let imageId: number | undefined
         if (options.readImage) {
           if (++imageCount > maxXlsxImages) throw new RangeError('Excel 最多导出 300 张图片')
           if (!images.has(image.id)) {
-            const asset = await options.readImage(image)
+            let asset: ColworkXlsxImage | undefined
+            try { asset = await options.readImage(image) }
+            catch (error) { if (!confirmWarnings) throw error }
             const extension = asset && (Object.keys(imageMime) as Image['extension'][]).find(type => imageMime[type] === asset.mimeType)
-            images.set(image.id, asset && extension
+            images.set(image.id, asset?.bytes.byteLength && extension
               ? workbook.addImage({ extension, buffer: Uint8Array.from(asset.bytes) as unknown as Image['buffer'] }) : undefined)
           }
-          const imageId = images.get(image.id)
-          if (imageId !== undefined) {
-            const merge = snapshot.merges.find(range => range.start.row === row && range.start.column === column)
-            const end = merge?.end ?? { row, column }
-            sheet.addImage(imageId, `${excelColumn(column)}${row + 1}:${excelColumn(end.column)}${end.row + 1}`)
-          }
+          imageId = images.get(image.id)
+        }
+        if (imageId === undefined) differences.images++
+        else {
+          const merge = snapshot.merges.find(range => range.start.row === row && range.start.column === column)
+          const end = merge?.end ?? { row, column }
+          sheet.addImage(imageId, `${excelColumn(column)}${row + 1}:${excelColumn(end.column)}${end.row + 1}`)
         }
       }
       if (value !== undefined) {
@@ -459,9 +519,12 @@ export async function exportXlsx(document: Y.Doc, options: XlsxExportOptions = {
     let validated = 0
     for (const [range, raw] of validation) {
       const rule = readFeature(raw, isDataValidation)
-      if (!rule || !range || rule.choices.some(choice => /[,"\r\n]/.test(choice))) continue
+      if (!rule || !range) continue
       const formula = '"' + rule.choices.join(',') + '"'
-      if (formula.length > 255) continue
+      if (formula.length > 255 || rule.choices.some(choice => /[,"\r\n]/.test(choice))) {
+        differences.dataValidation++
+        continue
+      }
       validated += (range.end.row - range.start.row + 1) * (range.end.column - range.start.column + 1)
       if (validated > maxCells) throw new RangeError('Excel 数据验证覆盖范围过大')
       const cells = (sheet as Worksheet & { dataValidations: { add(address: string, rule: DataValidation): void } }).dataValidations
@@ -491,6 +554,10 @@ export async function exportXlsx(document: Y.Doc, options: XlsxExportOptions = {
     for (const [key, height] of Object.entries(snapshot.rowHeights)) sheet.getRow(Number(key) + 1).height = height * 3 / 4
     for (const [key, width] of Object.entries(snapshot.columnWidths)) sheet.getColumn(Number(key) + 1).width = Math.max(1, (width - 5) / 7)
     for (const { start, end } of snapshot.merges) sheet.mergeCellsWithoutStyle(start.row + 1, start.column + 1, end.row + 1, end.column + 1)
+    for (const feature of Object.keys(differences) as Array<keyof typeof differences>) {
+      if (differences[feature]) warnings.push({ feature, sheet: name, count: differences[feature] })
+    }
   }
+  if (warnings.length && confirmWarnings && !await confirmWarnings(warnings)) throw new Error('已取消导出 Excel')
   return new Uint8Array(await workbook.xlsx.writeBuffer())
 }

@@ -8,3 +8,5 @@ export { cellKey, containsPosition, normalizeRange, rangeSize } from './range'
 export type { AwarenessSelection, SelectionMode } from './selection'
 export type { ColworkVersion, ColworkVersionPage, ColworkVersionContext, ColworkVersionHistory } from './versionHistory'
 export { createColworkWebSocket, waitForColworkSync } from './colworkWebSocket'
+export { ColworkSaveTracker, trackColworkWorkerSave, type ColworkConnectionState, type ColworkSaveState,
+  type ColworkSaveReceipt, type ColworkSaveConfirmation, type ColworkSaveTrackerOptions } from './saveState'
